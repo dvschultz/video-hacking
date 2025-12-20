@@ -1,0 +1,17 @@
+numpy>=1.24.0,<2.0.0  # Must be <2.0 for PyTorch 2.1.0 compatibility
+torch==2.1.0  # Locked to 2.1.0 for compatibility
+torchaudio==2.1.0  # Locked to 2.1.0 to avoid torchcodec issues
+torchvision  # Required for ImageBind
+librosa>=0.10.0
+laion-clap
+transformers  # Required by laion-clap
+demucs
+scipy
+matplotlib
+soundfile
+einops  # Required by demucs
+julius  # Required by demucs
+ftfy  # Required for ImageBind
+regex  # Required for ImageBind
+Pillow  # Required for ImageBind image processing
+opencv-python==4.8.1.78  # Locked to 4.8.x for NumPy 1.x compatibility

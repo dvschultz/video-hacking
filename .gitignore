@@ -1,0 +1,23 @@
+
+# Nimbalyst local plans (not checked into version control)
+nimbalyst-local/
+
+# Data files (audio, video, separated stems, outputs)
+data/
+
+# Model checkpoints (too large for git)
+.checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
