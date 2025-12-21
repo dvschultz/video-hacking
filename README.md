@@ -8,6 +8,7 @@ This project uses **ImageBind multimodal embeddings** to semantically match vide
 
 ## Features
 
+### Audio-Driven Video Art
 - **Onset strength analysis**: Frame-accurate continuous onset strength values for precise cut points
 - **Source separation**: Separate audio into stems using Demucs (drums, bass, vocals, other)
 - **ImageBind embeddings**: Unified audio-visual embeddings for semantic matching
@@ -15,6 +16,13 @@ This project uses **ImageBind multimodal embeddings** to semantically match vide
 - **Flexible reuse policies**: Control how video segments can be reused (none, allow, min_gap, limited, percentage)
 - **High-quality output**: H.264 (CRF 18) and ProRes 422 outputs for editing
 - **Interactive visualization**: Real-time threshold adjustment with playback
+
+### Pitch-Matching Video Recutting
+- **Multiple pitch detection methods**: CREPE, SwiftF0, Basic Pitch, or hybrid mixture-of-experts
+- **Intelligent pitch tracking**: Handles vibrato, pitch drift, and silence detection
+- **Pitch smoothing**: Median filtering to reduce false segmentation from natural vocal variations
+- **MIDI preview videos**: Visual verification of pitch detection accuracy
+- **Configurable parameters**: Silence threshold, pitch change sensitivity, segment duration filters
 
 ## Installation
 
@@ -170,6 +178,143 @@ python src/video_assembler.py \
 **Quality Settings:**
 - H.264: CRF 18 (visually lossless), slow preset, 320kbps AAC audio
 - ProRes 422: 10-bit 4:2:2 color, uncompressed PCM audio
+
+## Pitch-Matching Video Recutting
+
+Create videos that match the pitch sequence of a guide vocal by recutting source singing footage.
+
+### Quick Start
+
+```bash
+# Analyze guide video to extract pitch sequence
+./test_pitch_guide.sh data/input/guide_video.mp4
+
+# This creates:
+# - data/segments/guide_sequence.json (pitch data)
+# - data/segments/guide_midi_preview.mp4 (verification video)
+```
+
+### Pitch Detection Methods
+
+Choose from four pitch detection algorithms:
+
+**CREPE** (default, most accurate):
+```bash
+./test_pitch_guide.sh video.mp4 --pitch-method crepe
+```
+- Deep learning-based pitch detection
+- Most accurate for monophonic singing
+- Requires TensorFlow, slower but reliable
+
+**SwiftF0** (fastest):
+```bash
+./test_pitch_guide.sh video.mp4 --pitch-method swift-f0
+```
+- CPU-optimized, very fast (132ms for 5s audio)
+- Good accuracy, no GPU required
+- May add spurious low bass notes
+
+**Hybrid** (best of both):
+```bash
+./test_pitch_guide.sh video.mp4 --pitch-method hybrid
+```
+- Mixture-of-experts combining CREPE + SwiftF0
+- Uses CREPE as primary, fills gaps with SwiftF0
+- Filters SwiftF0 outliers (bass notes, pitch jumps)
+- **Recommended for best results**
+
+**Basic Pitch** (multipitch):
+```bash
+./test_pitch_guide.sh video.mp4 --pitch-method basic-pitch
+```
+- Spotify's multipitch detection
+- Can detect harmonies
+- 3x sub-semitone resolution
+
+### Tuning Parameters
+
+**Pitch Change Threshold** (cents):
+```bash
+# More sensitive (more segments)
+./test_pitch_guide.sh video.mp4 --threshold 30
+
+# Less sensitive (smoother, fewer segments)
+./test_pitch_guide.sh video.mp4 --threshold 100
+```
+- Default: 50 cents
+- Lower = splits on smaller pitch changes
+- Higher = ignores vibrato/drift
+
+**Silence Detection**:
+```bash
+# More permissive (catches quiet singing)
+./test_pitch_guide.sh video.mp4 --silence-threshold -60
+
+# More strict (treats quiet sounds as silence)
+./test_pitch_guide.sh video.mp4 --silence-threshold -45
+```
+- Default: -50 dB
+- Lower (more negative) = more permissive
+- Helps with quiet consonants, soft singing
+
+**Pitch Smoothing**:
+```bash
+# Reduce vibrato/waver
+./test_pitch_guide.sh video.mp4 --pitch-smoothing 5
+
+# Aggressive smoothing
+./test_pitch_guide.sh video.mp4 --pitch-smoothing 7
+```
+- Default: 0 (off)
+- Median filter window size: 5-7 recommended
+- Smooths pitch curve before segmentation
+- Higher values may miss quick note changes
+
+**Minimum Duration**:
+```bash
+# Filter out very short notes
+./test_pitch_guide.sh video.mp4 --min-duration 0.15
+```
+- Default: 0.1 seconds
+- Filters brief pitch fluctuations
+- Useful for cleaning up noisy detections
+
+### Complete Example
+
+```bash
+# Best settings for wavy vocals
+./test_pitch_guide.sh guide.mp4 \
+  --pitch-method hybrid \
+  --pitch-smoothing 5 \
+  --silence-threshold -60 \
+  --threshold 75 \
+  --min-duration 0.12
+
+# Review MIDI preview
+open data/segments/guide_midi_preview.mp4
+```
+
+### How It Works
+
+1. **Extract audio** from video
+2. **Detect continuous pitch** using selected method
+3. **Apply smoothing** (optional) to reduce vibrato
+4. **Segment on changes**: Split when pitch changes >threshold OR silence detected
+5. **Filter segments**: Remove very short segments
+6. **Generate MIDI preview**: Create video with synthesized tones for verification
+
+### Output Files
+
+- `guide_sequence.json` - Pitch sequence data (time, Hz, MIDI note, confidence)
+- `guide_midi_preview.mp4` - Video with MIDI playback for verification
+
+### Tips for Best Results
+
+1. **Use hybrid mode** for most vocals - best accuracy with gap filling
+2. **Watch the MIDI preview** - tones should match singing closely
+3. **Adjust silence threshold** if too many/few gaps detected
+4. **Use pitch smoothing (5-7)** for vibrato-heavy vocals
+5. **Increase threshold** if you get too many micro-segments
 
 ## Interactive Tools
 
@@ -382,13 +527,21 @@ All scripts auto-detect GPU with `--device auto`
 - **soundfile**: Audio I/O
 - **demucs**: Source separation
 
+### Pitch Detection
+- **crepe**: Deep learning pitch detection (requires TensorFlow)
+- **tensorflow** (<2.16.0): Required by CREPE
+- **swift-f0**: Fast CPU-based pitch detection
+- **basic-pitch**: Spotify's multipitch detection
+- **scipy**: Signal processing (median filtering)
+
 ### Embeddings
 - **imagebind**: Multimodal embeddings (auto-installed)
-- **transformers**: Required by ImageBind dependencies
+- **transformers** (<4.36.0): Required by ImageBind and Basic Pitch
 - **Pillow**: Image processing
 
 ## Next Steps
 
+### Audio-Driven Video Art (Complete)
 - [x] Onset strength analysis
 - [x] Audio segmentation
 - [x] ImageBind audio embeddings
@@ -400,6 +553,16 @@ All scripts auto-detect GPU with `--device auto`
 - [ ] Additional reuse strategies
 - [ ] Color grading integration
 
+### Pitch-Matching Video Recutting
+- [x] Multiple pitch detection methods (CREPE, SwiftF0, Basic Pitch)
+- [x] Hybrid mixture-of-experts (CREPE + SwiftF0)
+- [x] Pitch smoothing and silence detection
+- [x] MIDI preview video generation
+- [x] Configurable parameters (threshold, smoothing, silence)
+- [ ] Source video pitch analysis
+- [ ] Pitch matching between guide and source
+- [ ] Final video assembly based on pitch matches
+
 ## License
 
 MIT License - See LICENSE file for details
@@ -409,3 +572,6 @@ MIT License - See LICENSE file for details
 - **ImageBind** by Meta AI Research
 - **Demucs** by Alexandre Défossez
 - **librosa** by Brian McFee
+- **CREPE** by Jong Wook Kim et al.
+- **SwiftF0** by lars76
+- **Basic Pitch** by Spotify Research

@@ -4,7 +4,7 @@ torchaudio==2.1.0  # Locked to 2.1.0 to avoid torchcodec issues
 torchvision  # Required for ImageBind
 librosa>=0.10.0
 laion-clap
-transformers  # Required by laion-clap
+transformers<4.36.0  # Required by laion-clap, pinned for PyTorch 2.1.0 compatibility
 demucs
 scipy
 matplotlib
@@ -15,3 +15,8 @@ ftfy  # Required for ImageBind
 regex  # Required for ImageBind
 Pillow  # Required for ImageBind image processing
 opencv-python==4.8.1.78  # Locked to 4.8.x for NumPy 1.x compatibility
+crepe>=0.0.12  # Deep learning pitch detection for singing analysis
+tensorflow>=2.8.0,<2.16.0  # Required by CREPE (avoid 2.16+ for compatibility)
+basic-pitch  # Spotify's multipitch detection (alternative to CREPE)
+swift-f0  # Fast CPU-based pitch detection (alternative to CREPE)
+sounddevice  # Optional: for MIDI player audio playback

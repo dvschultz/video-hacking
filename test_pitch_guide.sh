@@ -1,0 +1,116 @@
+#!/bin/bash
+# Test script for pitch guide analyzer
+# Analyzes a guide video to extract pitch sequence
+
+set -e  # Exit on error
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}=== Pitch Guide Analyzer Test ===${NC}\n"
+
+# Check arguments
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <guide_video.mp4> [options]"
+    echo ""
+    echo "Options:"
+    echo "  --fps N              Video frame rate (default: 24)"
+    echo "  --threshold N        Pitch change threshold in cents (default: 50)"
+    echo "                       Splits when pitch changes by N cents OR at silence"
+    echo "                       Each note holds until next pitch change or silence"
+    echo "                       Lower = more segments, Higher = smoother playback"
+    echo "  --min-duration N     Minimum segment duration (default: 0.1s)"
+    echo "                       Filters very short notes/syllables"
+    echo "  --silence-threshold N  Silence detection threshold in dB (default: -50)"
+    echo "                       Lower = more permissive (detects quieter sounds)"
+    echo "                       Higher = more strict (treats quiet sounds as silence)"
+    echo "                       Try -60 if too much silence, -45 if too little"
+    echo "  --pitch-smoothing N  Median filter window size (default: 0=off)"
+    echo "                       Reduces vibrato/pitch waver. Try 5-7 for wavy vocals"
+    echo "                       Higher values = more smoothing, but may miss quick notes"
+    echo "  --pitch-method METHOD  Pitch detection algorithm (default: crepe)"
+    echo "                       Options: crepe (accurate), basic-pitch (multipitch),"
+    echo "                                swift-f0 (fast CPU), hybrid (crepe+swift-f0),"
+    echo "                                pyin (fallback)"
+    echo "  --use-pyin           (Deprecated) Use pYIN - prefer --pitch-method pyin"
+    echo ""
+    echo "Examples:"
+    echo "  $0 data/input/singing_guide.mp4"
+    echo "  $0 data/input/singing_guide.mp4 --min-duration 0.15  # Filter short notes"
+    echo "  $0 data/input/singing_guide.mp4 --pitch-smoothing 5  # Smooth out vibrato"
+    echo "  $0 data/input/singing_guide.mp4 --pitch-method hybrid  # Best of both CREPE+SwiftF0"
+    echo "  $0 data/input/singing_guide.mp4 --pitch-method swift-f0  # Use fast SwiftF0"
+    echo "  $0 data/input/singing_guide.mp4 --pitch-method basic-pitch  # Use Spotify's Basic Pitch"
+    echo "  $0 data/input/singing_guide.mp4 --silence-threshold -60  # More permissive silence detection"
+    exit 1
+fi
+
+GUIDE_VIDEO="$1"
+shift  # Remove first argument, rest are options
+
+# Check if file exists
+if [ ! -f "$GUIDE_VIDEO" ]; then
+    echo -e "${YELLOW}Error: Guide video not found: $GUIDE_VIDEO${NC}"
+    exit 1
+fi
+
+# Setup paths
+OUTPUT_DIR="data/segments"
+TEMP_DIR="data/temp"
+OUTPUT_JSON="$OUTPUT_DIR/guide_sequence.json"
+
+# Create directories
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$TEMP_DIR"
+
+# Detect Python command
+if command -v python &> /dev/null; then
+    PYTHON_CMD=python
+elif command -v python3 &> /dev/null; then
+    PYTHON_CMD=python3
+else
+    echo -e "${YELLOW}Error: Python not found${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Step 1: Analyzing guide video pitch sequence${NC}"
+echo "Input: $GUIDE_VIDEO"
+echo "Output: $OUTPUT_JSON"
+echo ""
+
+$PYTHON_CMD src/pitch_guide_analyzer.py \
+    --video "$GUIDE_VIDEO" \
+    --output "$OUTPUT_JSON" \
+    --temp-dir "$TEMP_DIR" \
+    "$@"
+
+echo ""
+echo -e "${GREEN}Step 2: Creating MIDI preview video${NC}"
+echo ""
+
+if [ -f "$OUTPUT_JSON" ]; then
+    PREVIEW_VIDEO="$OUTPUT_DIR/guide_midi_preview.mp4"
+    $PYTHON_CMD src/pitch_video_preview.py \
+        --video "$GUIDE_VIDEO" \
+        --pitch-json "$OUTPUT_JSON" \
+        --output "$PREVIEW_VIDEO"
+else
+    echo -e "${YELLOW}Warning: Output JSON not found, skipping preview video${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}=== Analysis Complete ===${NC}"
+echo ""
+echo "Results saved to:"
+echo "  - Pitch sequence: $OUTPUT_JSON"
+echo "  - Preview video: $OUTPUT_DIR/guide_midi_preview.mp4"
+echo ""
+echo "Next steps:"
+echo "  1. Watch guide_midi_preview.mp4 to verify pitch detection"
+echo "     (MIDI tones should match the singing!)"
+echo "  2. Adjust --threshold if too many/few notes detected"
+echo "  3. Run source video analysis with same settings"
+echo ""
