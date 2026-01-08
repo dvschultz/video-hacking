@@ -110,7 +110,10 @@ class PitchGuideAnalyzer:
                               pitch_change_threshold: float = 50.0,
                               min_segment_duration: float = 0.1,
                               min_rms_db: float = -50.0,
-                              pitch_smoothing: int = 0) -> List[Dict]:
+                              pitch_smoothing: int = 0,
+                              min_rest_duration: float = 0.1,
+                              include_rests: bool = True,
+                              verify_rest_rms: bool = True) -> List[Dict]:
         """
         Detect pitch changes (when singer changes notes or syllables).
 
@@ -120,9 +123,12 @@ class PitchGuideAnalyzer:
             min_segment_duration: Minimum segment length in seconds
             min_rms_db: Minimum RMS amplitude to detect silence (default: -50dB)
             pitch_smoothing: Median filter window size for pitch smoothing (0=off, 5-7 recommended)
+            min_rest_duration: Minimum gap duration to create rest segment (default: 0.1s)
+            include_rests: Include explicit rest segments for gaps (default: True)
+            verify_rest_rms: Verify gaps are silent via RMS check (default: True)
 
         Returns:
-            List of pitch segment dictionaries
+            List of pitch segment dictionaries (includes rest segments if include_rests=True)
         """
         if self.audio_path is None:
             raise ValueError("Must extract audio first")
@@ -149,6 +155,18 @@ class PitchGuideAnalyzer:
         self.pitch_sequence = detector.segments_to_dict(segments)
 
         print(f"Detected {len(self.pitch_sequence)} pitch segments")
+
+        # Insert explicit rest segments for gaps between pitched segments
+        if include_rests and len(self.pitch_sequence) > 0:
+            self.pitch_sequence = self._insert_rest_segments(
+                self.pitch_sequence,
+                min_rest_duration=min_rest_duration,
+                verify_rms=verify_rest_rms,
+                silence_threshold_db=min_rms_db
+            )
+            num_rests = sum(1 for s in self.pitch_sequence if s.get('is_rest', False))
+            num_pitched = len(self.pitch_sequence) - num_rests
+            print(f"After adding rests: {num_pitched} pitched + {num_rests} rest = {len(self.pitch_sequence)} total segments")
 
         if len(self.pitch_sequence) > 0:
             print(f"First segment: {self.pitch_sequence[0]['start_time']:.3f}s")
@@ -398,6 +416,122 @@ class PitchGuideAnalyzer:
 
         return merged
 
+    def _get_rms_db(self, start_time: float, end_time: float) -> float:
+        """
+        Calculate RMS amplitude in dB for a time range.
+
+        Args:
+            start_time: Start time in seconds
+            end_time: End time in seconds
+
+        Returns:
+            RMS amplitude in dB
+        """
+        if self.audio is None or self.sr is None:
+            return 0.0
+
+        start_sample = int(start_time * self.sr)
+        end_sample = int(end_time * self.sr)
+
+        # Clamp to valid range
+        start_sample = max(0, start_sample)
+        end_sample = min(len(self.audio), end_sample)
+
+        if end_sample <= start_sample:
+            return -100.0  # Treat as silent
+
+        audio_segment = self.audio[start_sample:end_sample]
+        rms = np.sqrt(np.mean(audio_segment ** 2))
+
+        if rms < 1e-10:
+            return -100.0  # Effectively silent
+
+        return 20 * np.log10(rms)
+
+    def _insert_rest_segments(self,
+                              pitch_segments: List[Dict],
+                              min_rest_duration: float = 0.1,
+                              verify_rms: bool = True,
+                              silence_threshold_db: float = -50.0) -> List[Dict]:
+        """
+        Insert rest segments for gaps between pitched segments.
+
+        Args:
+            pitch_segments: List of pitched segment dictionaries (already sorted by time)
+            min_rest_duration: Minimum gap duration to create a rest (seconds)
+            verify_rms: If True, verify the gap is actually silent via RMS check
+            silence_threshold_db: RMS threshold below which audio is considered silent
+
+        Returns:
+            New list with rest segments interleaved
+        """
+        if not pitch_segments:
+            return pitch_segments
+
+        result = []
+        current_time = 0.0  # Start from beginning of audio
+
+        for seg in pitch_segments:
+            gap_start = current_time
+            gap_end = seg['start_time']
+            gap_duration = gap_end - gap_start
+
+            # Check if gap is long enough to be a rest
+            if gap_duration >= min_rest_duration:
+                # Optional: verify gap is actually silent
+                is_silence = True
+                if verify_rms and self.audio is not None:
+                    rms_db = self._get_rms_db(gap_start, gap_end)
+                    is_silence = rms_db < silence_threshold_db
+
+                if is_silence:
+                    rest_segment = {
+                        'start_time': gap_start,
+                        'end_time': gap_end,
+                        'duration': gap_duration,
+                        'pitch_hz': 0.0,
+                        'pitch_midi': -1,
+                        'pitch_note': 'REST',
+                        'pitch_confidence': 1.0,
+                        'is_rest': True
+                    }
+                    result.append(rest_segment)
+
+            # Add the pitched segment (with is_rest: false for clarity)
+            seg['is_rest'] = False
+            result.append(seg)
+            current_time = seg['end_time']
+
+        # Check for trailing rest (gap after last segment to end of audio)
+        if self.audio is not None:
+            audio_end = len(self.audio) / self.sr
+            trailing_gap = audio_end - current_time
+
+            if trailing_gap >= min_rest_duration:
+                is_silence = True
+                if verify_rms:
+                    rms_db = self._get_rms_db(current_time, audio_end)
+                    is_silence = rms_db < silence_threshold_db
+
+                if is_silence:
+                    rest_segment = {
+                        'start_time': current_time,
+                        'end_time': audio_end,
+                        'duration': trailing_gap,
+                        'pitch_hz': 0.0,
+                        'pitch_midi': -1,
+                        'pitch_note': 'REST',
+                        'pitch_confidence': 1.0,
+                        'is_rest': True
+                    }
+                    result.append(rest_segment)
+
+        # Re-index all segments
+        for i, seg in enumerate(result):
+            seg['index'] = i
+
+        return result
+
     def save_results(self, output_path: str):
         """
         Save pitch sequence to JSON file.
@@ -408,6 +542,16 @@ class PitchGuideAnalyzer:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Count pitched vs rest segments
+        num_rests = sum(1 for s in self.pitch_sequence if s.get('is_rest', False))
+        num_pitched = len(self.pitch_sequence) - num_rests
+
+        # Calculate durations
+        pitched_segments = [s for s in self.pitch_sequence if not s.get('is_rest', False)]
+        rest_segments = [s for s in self.pitch_sequence if s.get('is_rest', False)]
+        musical_duration = sum(s['duration'] for s in pitched_segments)
+        rest_duration = sum(s['duration'] for s in rest_segments)
+
         # Prepare output data
         data = {
             'video_path': str(self.video_path),
@@ -416,7 +560,11 @@ class PitchGuideAnalyzer:
             'sample_rate': self.sr,
             'pitch_detection_method': self.pitch_method.upper(),
             'num_segments': len(self.pitch_sequence),
+            'num_pitched_segments': num_pitched,
+            'num_rest_segments': num_rests,
             'total_duration': float(self.audio.shape[0] / self.sr) if self.audio is not None else 0,
+            'musical_duration': musical_duration,
+            'rest_duration': rest_duration,
             'guide_sequence': self.pitch_sequence
         }
 
@@ -425,16 +573,18 @@ class PitchGuideAnalyzer:
             json.dump(data, f, indent=2)
 
         print(f"\nSaved pitch sequence to: {output_path}")
-        print(f"Total segments: {len(self.pitch_sequence)}")
+        print(f"Total segments: {len(self.pitch_sequence)} ({num_pitched} pitched, {num_rests} rests)")
 
         # Print statistics
-        if len(self.pitch_sequence) > 0:
-            pitches = [s['pitch_midi'] for s in self.pitch_sequence]
-            confidences = [s['pitch_confidence'] for s in self.pitch_sequence]
+        if num_pitched > 0:
+            pitches = [s['pitch_midi'] for s in pitched_segments]
+            confidences = [s['pitch_confidence'] for s in pitched_segments]
 
             print(f"Pitch range: {midi_to_note_name(min(pitches))} to {midi_to_note_name(max(pitches))}")
             print(f"Average confidence: {np.mean(confidences):.3f}")
-            print(f"Total musical duration: {sum(s['duration'] for s in self.pitch_sequence):.2f}s")
+            print(f"Musical duration: {musical_duration:.2f}s")
+            if num_rests > 0:
+                print(f"Rest duration: {rest_duration:.2f}s")
 
     def print_sequence_summary(self, limit: int = 20):
         """Print summary of detected pitch sequence."""
@@ -522,6 +672,22 @@ def main():
         default='data/temp',
         help='Temporary directory for extracted audio'
     )
+    parser.add_argument(
+        '--min-rest-duration',
+        type=float,
+        default=0.1,
+        help='Minimum gap duration to create rest segment (default: 0.1s)'
+    )
+    parser.add_argument(
+        '--no-rest-segments',
+        action='store_true',
+        help='Disable rest segment detection (only output pitched segments)'
+    )
+    parser.add_argument(
+        '--no-verify-rest-rms',
+        action='store_true',
+        help='Skip RMS verification for rest segments (faster, less accurate)'
+    )
 
     args = parser.parse_args()
 
@@ -549,7 +715,10 @@ def main():
         pitch_change_threshold=args.threshold,
         min_segment_duration=args.min_duration,
         min_rms_db=args.silence_threshold,
-        pitch_smoothing=args.pitch_smoothing
+        pitch_smoothing=args.pitch_smoothing,
+        min_rest_duration=args.min_rest_duration,
+        include_rests=not args.no_rest_segments,
+        verify_rest_rms=not args.no_verify_rest_rms
     )
 
     # Step 3: Print summary
