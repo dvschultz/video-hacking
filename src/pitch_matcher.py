@@ -33,8 +33,9 @@ class PitchMatcher:
                  min_reuse_gap: int = 5,
                  max_reuses: int = 3,
                  reuse_percentage: float = 0.3,
-                 duration_weight: float = 0.6,
+                 duration_weight: float = 0.3,
                  confidence_weight: float = 0.4,
+                 consistency_weight: float = 0.3,
                  allow_transposition: bool = True,
                  max_transposition_semitones: int = 12,
                  prefer_small_transposition: bool = True,
@@ -51,6 +52,7 @@ class PitchMatcher:
             reuse_percentage: Maximum percentage of segments that can be reuses (for 'percentage' policy)
             duration_weight: Weight for duration matching in scoring (0-1)
             confidence_weight: Weight for confidence in scoring (0-1)
+            consistency_weight: Weight for loopability/consistency in scoring (0-1)
             allow_transposition: Allow pitch transposition if no exact match
             max_transposition_semitones: Maximum semitones to transpose
             prefer_small_transposition: Prefer smaller transposition amounts
@@ -68,6 +70,7 @@ class PitchMatcher:
         # Scoring weights
         self.duration_weight = duration_weight
         self.confidence_weight = confidence_weight
+        self.consistency_weight = consistency_weight
 
         # Transposition settings
         self.allow_transposition = allow_transposition
@@ -153,9 +156,14 @@ class PitchMatcher:
         # Confidence score (already 0-1)
         confidence_score = source_seg['pitch_confidence']
 
-        # Combined score
+        # Consistency/loopability score (from database, fallback to confidence if not available)
+        # Loopability combines RMS consistency and pitch consistency
+        consistency_score = source_seg.get('loopability', confidence_score)
+
+        # Combined score with three-way weighting
         score = (self.duration_weight * duration_score +
-                 self.confidence_weight * confidence_score)
+                 self.confidence_weight * confidence_score +
+                 self.consistency_weight * consistency_score)
 
         return score
 
@@ -629,6 +637,7 @@ class PitchMatcher:
                 'reuse_policy': self.reuse_policy,
                 'duration_weight': self.duration_weight,
                 'confidence_weight': self.confidence_weight,
+                'consistency_weight': self.consistency_weight,
                 'allow_transposition': self.allow_transposition,
                 'max_transposition_semitones': self.max_transposition_semitones,
                 'combine_clips_for_duration': self.combine_clips_for_duration
@@ -704,14 +713,20 @@ def main():
     parser.add_argument(
         '--duration-weight',
         type=float,
-        default=0.6,
-        help='Weight for duration matching (default: 0.6)'
+        default=0.3,
+        help='Weight for duration matching (default: 0.3)'
     )
     parser.add_argument(
         '--confidence-weight',
         type=float,
         default=0.4,
-        help='Weight for confidence matching (default: 0.4)'
+        help='Weight for pitch confidence matching (default: 0.4)'
+    )
+    parser.add_argument(
+        '--consistency-weight',
+        type=float,
+        default=0.3,
+        help='Weight for loopability/consistency matching (default: 0.3)'
     )
     parser.add_argument(
         '--no-transposition',
@@ -748,6 +763,7 @@ def main():
         reuse_percentage=args.reuse_percentage,
         duration_weight=args.duration_weight,
         confidence_weight=args.confidence_weight,
+        consistency_weight=args.consistency_weight,
         allow_transposition=not args.no_transposition,
         max_transposition_semitones=args.max_transpose,
         prefer_small_transposition=True,

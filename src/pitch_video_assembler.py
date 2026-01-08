@@ -550,6 +550,93 @@ class PitchVideoAssembler:
             print(f"stderr: {e.stderr.decode()}")
             raise
 
+    def _merge_short_clips(self, source_clips: List[Dict], min_duration: float = 0.04) -> List[Dict]:
+        """
+        Merge clips shorter than min_duration with adjacent clips.
+
+        Short clips are extended by borrowing frames from the previous clip's end
+        or the next clip's start. If a clip is still too short after merging,
+        it's combined with its neighbor.
+
+        Args:
+            source_clips: List of clip dictionaries with video_start_frame, video_end_frame
+            min_duration: Minimum clip duration in seconds (default: 0.04s = 1 frame at 24fps)
+
+        Returns:
+            List of merged clip dictionaries
+        """
+        if not source_clips:
+            return source_clips
+
+        # Group clips by video path (can only merge clips from same video)
+        # For now, process all clips together since they're usually from same video
+        merged = []
+        pending_short = None  # Accumulate short clips to merge with next valid clip
+
+        for clip in source_clips:
+            video_path = clip['video_path']
+            start_frame = int(clip['video_start_frame'])
+            end_frame = int(clip['video_end_frame'])
+
+            # Get fps for duration calculation
+            fps = self.get_video_fps(video_path)
+            clip_duration = (end_frame - start_frame) / fps
+
+            if clip_duration < min_duration:
+                # This clip is too short
+                if merged:
+                    # Extend previous clip's end to include this short clip
+                    prev = merged[-1]
+                    if prev['video_path'] == video_path:
+                        # Use max to avoid shrinking previous clip if short clip is from looped segment
+                        prev['video_end_frame'] = max(int(prev['video_end_frame']), end_frame)
+                        prev['duration'] = (prev['video_end_frame'] - prev['video_start_frame']) / fps
+                        print(f"    Merged short clip ({clip_duration:.3f}s) into previous clip")
+                        continue
+
+                # No previous clip to merge with - save for merging with next
+                if pending_short is None:
+                    pending_short = clip.copy()
+                else:
+                    # Extend pending short clip
+                    pending_short['video_end_frame'] = end_frame
+                continue
+
+            # This clip is long enough
+            if pending_short is not None:
+                # Merge pending short clip into this one by extending start backwards
+                if pending_short['video_path'] == video_path:
+                    start_frame = int(pending_short['video_start_frame'])
+                    print(f"    Merged pending short clip into current clip")
+                pending_short = None
+
+            # Add this clip (possibly with extended start)
+            new_clip = clip.copy()
+            new_clip['video_start_frame'] = start_frame
+            new_clip['video_end_frame'] = end_frame
+            new_clip['duration'] = (end_frame - start_frame) / fps
+            merged.append(new_clip)
+
+        # Handle any remaining pending short clip
+        if pending_short is not None:
+            if merged:
+                # Extend last clip to include pending
+                last = merged[-1]
+                if last['video_path'] == pending_short['video_path']:
+                    # Use max to avoid shrinking if pending is from looped segment
+                    last['video_end_frame'] = max(int(last['video_end_frame']), int(pending_short['video_end_frame']))
+                    fps = self.get_video_fps(last['video_path'])
+                    last['duration'] = (last['video_end_frame'] - last['video_start_frame']) / fps
+                    print(f"    Merged trailing short clip into previous clip")
+                else:
+                    # Different video, have to include as-is
+                    merged.append(pending_short)
+            else:
+                # Only short clips, include as-is
+                merged.append(pending_short)
+
+        return merged
+
     def process_match(self, match: Dict, match_idx: int) -> List[str]:
         """
         Process a single match and create clip(s).
@@ -584,6 +671,9 @@ class PitchVideoAssembler:
 
             # Otherwise use verified silence clips from source database
             if source_clips:
+                # Merge short silence clips with neighbors
+                source_clips = self._merge_short_clips(source_clips)
+
                 print(f"  Match {match_idx}: REST ({duration:.3f}s, {len(source_clips)} silence clip(s))")
                 clip_files = []
 
@@ -597,8 +687,8 @@ class PitchVideoAssembler:
 
                     # Validate clip duration
                     clip_duration = (end_frame - start_frame) / fps
-                    if clip_duration < 0.04:
-                        print(f"    Skipping very short silence clip: {clip_duration:.3f}s")
+                    if clip_duration <= 0:
+                        print(f"    WARNING: Silence clip {clip_idx} has invalid duration: {clip_duration:.3f}s")
                         continue
 
                     # Extract silence clip (video with original silent audio)
@@ -623,6 +713,12 @@ class PitchVideoAssembler:
         source_clips = match['source_clips']
         if not source_clips:
             print(f"  Match {match_idx}: No source clips - skipping")
+            return []
+
+        # Merge short clips with neighbors to avoid dropping frames
+        source_clips = self._merge_short_clips(source_clips)
+        if not source_clips:
+            print(f"  Match {match_idx}: No valid clips after merging - skipping")
             return []
 
         clip_files = []
@@ -655,9 +751,6 @@ class PitchVideoAssembler:
             if clip_duration <= 0:
                 print(f"    WARNING: Clip {clip_idx} has invalid duration: {clip_duration:.3f}s "
                       f"(frames {start_frame}-{end_frame})")
-                continue
-            if clip_duration < 0.04:  # Less than 1 frame at 24fps
-                print(f"    WARNING: Clip {clip_idx} very short: {clip_duration:.3f}s, skipping")
                 continue
 
             # Create temporary video clip (no audio)

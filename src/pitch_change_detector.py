@@ -413,13 +413,18 @@ class PitchChangeDetector:
                              pitch_change_threshold_cents: float = 50.0,
                              min_segment_duration: float = 0.1,
                              max_segment_duration: float = 3.0,
-                             min_silence_duration: float = 0.1) -> List[Tuple[float, float, float, float]]:
+                             min_silence_duration: float = 0.1,
+                             split_on_rms_dips: bool = True,
+                             rms_dip_threshold_db: float = -6.0,
+                             min_dip_duration: float = 0.02,
+                             rms_window_ms: float = 50.0) -> List[Tuple[float, float, float, float]]:
         """
         Detect segments where pitch is stable (single note/syllable).
 
         Splits when EITHER:
         - Pitch changes by more than threshold (new note)
         - Sustained silence is detected (end of phrase)
+        - RMS dip detected (syllable/word boundary) - if enabled
         - Max duration exceeded
 
         Each note holds through small pitch variations (vibrato, drift) until
@@ -432,6 +437,10 @@ class PitchChangeDetector:
             min_segment_duration: Minimum segment length (seconds)
             max_segment_duration: Maximum segment length (seconds)
             min_silence_duration: Minimum silence duration to split (seconds)
+            split_on_rms_dips: Enable splitting on volume dips (syllable boundaries)
+            rms_dip_threshold_db: Threshold below local mean to count as dip (e.g., -6dB)
+            min_dip_duration: Minimum dip duration to trigger split (seconds)
+            rms_window_ms: Rolling window for computing local RMS mean (ms)
 
         Returns:
             List of (start_time, end_time, median_pitch_hz, confidence)
@@ -440,7 +449,10 @@ class PitchChangeDetector:
             raise ValueError("Must extract pitch first")
 
         print(f"\nDetecting pitch segments...")
-        print(f"Splits on: pitch changes >{pitch_change_threshold_cents} cents OR silence >{min_silence_duration}s")
+        split_criteria = f"pitch changes >{pitch_change_threshold_cents} cents OR silence >{min_silence_duration}s"
+        if split_on_rms_dips:
+            split_criteria += f" OR RMS dips <{rms_dip_threshold_db}dB for >{min_dip_duration*1000:.0f}ms"
+        print(f"Splits on: {split_criteria}")
         print(f"Notes hold through pitch drift until significant change or sustained silence")
 
         segments = []
@@ -525,6 +537,45 @@ class PitchChangeDetector:
                     # Continue current segment (hold the note)
                     current_segment_frames.append(i)
 
+                    # Check for RMS dips if segment is long enough
+                    if split_on_rms_dips and len(current_segment_frames) > 20:  # At least 200ms
+                        seg_start_time = self.times[current_segment_frames[0]]
+                        seg_current_time = time
+                        seg_duration = seg_current_time - seg_start_time
+
+                        # Only check if segment is at least 150ms (to allow splitting into 2x75ms)
+                        if seg_duration >= 0.15:
+                            dip_times = self._detect_rms_dips(
+                                seg_start_time,
+                                seg_current_time,
+                                dip_threshold_db=rms_dip_threshold_db,
+                                min_dip_duration=min_dip_duration,
+                                window_ms=rms_window_ms
+                            )
+
+                            # Split at first dip that leaves both parts long enough
+                            for dip_time in dip_times:
+                                first_part_duration = dip_time - seg_start_time
+                                second_part_duration = seg_current_time - dip_time
+
+                                if first_part_duration >= min_segment_duration and second_part_duration >= 0.05:
+                                    # Find frame index closest to dip time
+                                    split_frame_idx = None
+                                    for idx, frame_idx in enumerate(current_segment_frames):
+                                        if self.times[frame_idx] >= dip_time:
+                                            split_frame_idx = idx
+                                            break
+
+                                    if split_frame_idx and split_frame_idx > 0:
+                                        # Save first part
+                                        first_part_frames = current_segment_frames[:split_frame_idx]
+                                        self._save_segment(first_part_frames, segments, min_segment_duration)
+
+                                        # Continue with second part
+                                        current_segment_frames = current_segment_frames[split_frame_idx:]
+                                        current_segment_start = self.times[current_segment_frames[0]] if current_segment_frames else None
+                                        break  # Only split once per iteration
+
             else:
                 # Unvoiced/silence frame detected
                 if silence_start is None:
@@ -574,6 +625,90 @@ class PitchChangeDetector:
             mean_confidence = np.mean(confidences)
 
             segments.append((start_time, end_time, median_pitch, mean_confidence))
+
+    def _detect_rms_dips(self,
+                         start_time: float,
+                         end_time: float,
+                         dip_threshold_db: float = -6.0,
+                         min_dip_duration: float = 0.02,
+                         window_ms: float = 50.0) -> List[float]:
+        """
+        Detect RMS dips within a time range that indicate syllable/word boundaries.
+
+        Args:
+            start_time: Start time in seconds
+            end_time: End time in seconds
+            dip_threshold_db: Threshold below rolling mean to count as dip (negative, e.g., -6dB)
+            min_dip_duration: Minimum duration of dip in seconds (e.g., 0.02 = 20ms)
+            window_ms: Rolling window size for computing local mean RMS
+
+        Returns:
+            List of dip center times (in seconds) suitable for segment splits
+        """
+        start_sample = int(start_time * self.sr)
+        end_sample = int(end_time * self.sr)
+
+        if end_sample > len(self.audio):
+            end_sample = len(self.audio)
+
+        segment_audio = self.audio[start_sample:end_sample]
+
+        if len(segment_audio) < int(0.05 * self.sr):  # Need at least 50ms
+            return []
+
+        # Compute frame-by-frame RMS (10ms frames, 50% overlap)
+        frame_size = int(0.01 * self.sr)  # 10ms
+        hop_size = frame_size // 2  # 5ms hop
+
+        rms_frames = []
+        frame_times = []
+
+        for i in range(0, len(segment_audio) - frame_size, hop_size):
+            frame = segment_audio[i:i + frame_size]
+            rms = np.sqrt(np.mean(frame ** 2))
+            rms_db = 20 * np.log10(rms + 1e-10)
+            rms_frames.append(rms_db)
+            # Time is relative to segment start, convert to absolute
+            frame_times.append(start_time + (i + frame_size // 2) / self.sr)
+
+        if len(rms_frames) < 5:
+            return []
+
+        rms_frames = np.array(rms_frames)
+        frame_times = np.array(frame_times)
+
+        # Compute rolling mean RMS
+        window_frames = max(3, int(window_ms / 5))  # 5ms per hop
+
+        # Use convolution for rolling mean
+        kernel = np.ones(window_frames) / window_frames
+        rolling_mean = np.convolve(rms_frames, kernel, mode='same')
+
+        # Find frames that are significantly below local mean
+        dip_mask = rms_frames < (rolling_mean + dip_threshold_db)
+
+        # Find contiguous dip regions
+        dips = []
+        in_dip = False
+        dip_start_idx = 0
+
+        for i, is_dip in enumerate(dip_mask):
+            if is_dip and not in_dip:
+                in_dip = True
+                dip_start_idx = i
+            elif not is_dip and in_dip:
+                in_dip = False
+                dip_end_idx = i
+                # Duration: each frame is ~5ms (hop size)
+                dip_duration = (dip_end_idx - dip_start_idx) * (hop_size / self.sr)
+
+                if dip_duration >= min_dip_duration:
+                    # Return center of dip as split point
+                    dip_center_idx = (dip_start_idx + dip_end_idx) // 2
+                    if dip_center_idx < len(frame_times):
+                        dips.append(frame_times[dip_center_idx])
+
+        return dips
 
     def segments_to_dict(self, segments: List[Tuple[float, float, float, float]]) -> List[dict]:
         """

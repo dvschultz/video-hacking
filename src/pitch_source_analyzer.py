@@ -50,6 +50,35 @@ class PitchSourceAnalyzer:
         self.pitch_index = defaultdict(list)  # MIDI note -> list of segment IDs
         self.silence_segments = []  # Track silent sections
 
+    def detect_video_fps(self) -> float:
+        """
+        Auto-detect video frame rate using ffprobe.
+
+        Returns:
+            Frame rate as float (e.g., 29.97, 24.0, 30.0)
+        """
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=r_frame_rate',
+            '-of', 'csv=p=0',
+            str(self.video_path)
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+            fps_str = result.stdout.strip()
+            if '/' in fps_str:
+                num, den = fps_str.split('/')
+                fps = float(num) / float(den)
+            else:
+                fps = float(fps_str)
+            return fps
+        except (subprocess.CalledProcessError, ValueError, ZeroDivisionError) as e:
+            print(f"Warning: Could not detect video fps: {e}")
+            print("Falling back to 24 fps")
+            return 24.0
+
     def extract_audio(self, output_dir: str = "data/temp",
                      sample_rate: int = 22050,
                      normalize: bool = False,
@@ -119,26 +148,39 @@ class PitchSourceAnalyzer:
 
         return audio_path
 
-    def analyze_continuous_pitch(self, fps: int = 24,
+    def analyze_continuous_pitch(self, fps: float = None,
                                   pitch_change_threshold: float = 50.0,
                                   min_segment_duration: float = 0.1,
                                   min_rms_db: float = -50.0,
-                                  pitch_smoothing: int = 0) -> List[Dict]:
+                                  pitch_smoothing: int = 0,
+                                  split_on_rms_dips: bool = True,
+                                  rms_dip_threshold_db: float = -6.0,
+                                  min_dip_duration: float = 0.02,
+                                  rms_window_ms: float = 50.0) -> List[Dict]:
         """
         Analyze continuous pitch throughout the source video.
 
         Args:
-            fps: Video frame rate
+            fps: Video frame rate (None = auto-detect from video)
             pitch_change_threshold: Cents difference to trigger new segment
             min_segment_duration: Minimum segment length in seconds
             min_rms_db: Minimum RMS amplitude to detect silence
             pitch_smoothing: Median filter window size (0=off, 5-7 recommended)
+            split_on_rms_dips: Split segments on RMS dips (volume drops)
+            rms_dip_threshold_db: Dip threshold in dB below local mean
+            min_dip_duration: Minimum dip duration in seconds
+            rms_window_ms: Rolling window size in ms for local mean
 
         Returns:
             List of pitch segment dictionaries
         """
         if self.audio_path is None:
             raise ValueError("Must extract audio first")
+
+        # Auto-detect fps if not provided
+        if fps is None:
+            fps = self.detect_video_fps()
+            print(f"Auto-detected video fps: {fps:.3f}")
 
         self.fps = fps
 
@@ -150,12 +192,16 @@ class PitchSourceAnalyzer:
         # Extract continuous pitch with optional smoothing
         detector.extract_continuous_pitch(frame_time=0.01, pitch_smoothing_window=pitch_smoothing)
 
-        # Detect pitch segments (splits on pitch changes OR silence)
+        # Detect pitch segments (splits on pitch changes, silence, OR RMS dips)
         segments = detector.detect_pitch_segments(
             pitch_change_threshold_cents=pitch_change_threshold,
             min_segment_duration=min_segment_duration,
             min_confidence=0.5,
-            min_rms_db=min_rms_db
+            min_rms_db=min_rms_db,
+            split_on_rms_dips=split_on_rms_dips,
+            rms_dip_threshold_db=rms_dip_threshold_db,
+            min_dip_duration=min_dip_duration,
+            rms_window_ms=rms_window_ms
         )
 
         # Convert to dictionaries
@@ -256,7 +302,7 @@ class PitchSourceAnalyzer:
             pitch_segments: List of pitch segment dictionaries from continuous pitch analysis
 
         Returns:
-            List of database entries with video frame info and volume added
+            List of database entries with video frame info, volume, and consistency metrics
         """
         print(f"\nBuilding pitch database from {len(pitch_segments)} segments...")
 
@@ -272,9 +318,41 @@ class PitchSourceAnalyzer:
             end_sample = int(seg['end_time'] * self.sr)
             audio_segment = self.audio[start_sample:end_sample]
 
-            # Calculate RMS in dB
+            # Calculate overall RMS in dB
             rms = np.sqrt(np.mean(audio_segment**2))
             rms_db = 20 * np.log10(rms + 1e-10)
+
+            # === Calculate RMS consistency (stability of volume) ===
+            # Use frame-by-frame RMS variance
+            frame_size = int(0.01 * self.sr)  # 10ms frames
+            hop_size = frame_size // 2  # 5ms hop
+            rms_values = []
+
+            for j in range(0, len(audio_segment) - frame_size, hop_size):
+                frame = audio_segment[j:j + frame_size]
+                frame_rms = np.sqrt(np.mean(frame ** 2))
+                if frame_rms > 0:
+                    rms_values.append(frame_rms)
+
+            if len(rms_values) > 1:
+                rms_values = np.array(rms_values)
+                rms_mean = np.mean(rms_values)
+                rms_std = np.std(rms_values)
+                cv_rms = rms_std / (rms_mean + 1e-10)  # Coefficient of variation
+                # Score: 1.0 for perfectly stable, lower for more variable
+                rms_consistency = float(1.0 / (1.0 + cv_rms * 5))
+            else:
+                rms_consistency = 1.0
+
+            # === Calculate pitch consistency ===
+            # Use pitch_confidence as a proxy (high confidence = stable pitch)
+            # A more accurate approach would track per-frame pitch variance
+            # but that would require storing detector state
+            pitch_consistency = float(seg['pitch_confidence'])
+
+            # === Combined loopability score ===
+            # Equal weight to RMS and pitch consistency
+            loopability = float(0.5 * rms_consistency + 0.5 * pitch_consistency)
 
             entry = {
                 'segment_id': i,
@@ -286,6 +364,9 @@ class PitchSourceAnalyzer:
                 'pitch_note': seg['pitch_note'],
                 'pitch_confidence': seg['pitch_confidence'],
                 'rms_db': float(rms_db),
+                'rms_consistency': rms_consistency,
+                'pitch_consistency': pitch_consistency,
+                'loopability': loopability,
                 'video_start_frame': video_start_frame,
                 'video_end_frame': video_end_frame
             }
@@ -294,6 +375,13 @@ class PitchSourceAnalyzer:
 
         self.pitch_database = database
         print(f"Database complete: {len(database)} segments")
+
+        # Print consistency statistics
+        if database:
+            avg_loopability = np.mean([s['loopability'] for s in database])
+            avg_rms_cons = np.mean([s['rms_consistency'] for s in database])
+            avg_pitch_cons = np.mean([s['pitch_consistency'] for s in database])
+            print(f"  Avg loopability: {avg_loopability:.3f} (RMS: {avg_rms_cons:.3f}, pitch: {avg_pitch_cons:.3f})")
 
         return database
 
@@ -528,9 +616,9 @@ def main():
     )
     parser.add_argument(
         '--fps',
-        type=int,
-        default=24,
-        help='Video frame rate (default: 24)'
+        type=str,
+        default='auto',
+        help='Video frame rate (default: auto-detect from video). Use "auto" or specify a number like 29.97'
     )
     parser.add_argument(
         '--threshold',
@@ -590,6 +678,29 @@ def main():
         default=-16.0,
         help='Target loudness in LUFS when normalizing (default: -16, broadcast standard)'
     )
+    parser.add_argument(
+        '--no-rms-dip-split',
+        action='store_true',
+        help='Disable splitting segments on RMS dips (volume drops)'
+    )
+    parser.add_argument(
+        '--rms-dip-threshold',
+        type=float,
+        default=-6.0,
+        help='RMS dip threshold in dB below local mean (default: -6.0, negative = stricter)'
+    )
+    parser.add_argument(
+        '--min-dip-duration',
+        type=float,
+        default=0.02,
+        help='Minimum RMS dip duration in seconds (default: 0.02)'
+    )
+    parser.add_argument(
+        '--rms-window-ms',
+        type=float,
+        default=50.0,
+        help='RMS rolling window size in ms for dip detection (default: 50.0)'
+    )
 
     args = parser.parse_args()
 
@@ -606,6 +717,18 @@ def main():
     print(f"Pitch detection: {pitch_method.upper()}")
     if args.normalize:
         print(f"Audio normalization: ON (target {args.target_lufs} LUFS)")
+
+    # Parse fps argument
+    if args.fps.lower() == 'auto':
+        fps = None  # Will auto-detect
+        print("FPS: auto-detect")
+    else:
+        try:
+            fps = float(args.fps)
+            print(f"FPS: {fps}")
+        except ValueError:
+            print(f"Warning: Invalid fps value '{args.fps}', using auto-detect")
+            fps = None
     print()
 
     # Initialize analyzer
@@ -620,11 +743,15 @@ def main():
 
     # Step 2: Analyze continuous pitch
     pitch_segments = analyzer.analyze_continuous_pitch(
-        fps=args.fps,
+        fps=fps,
         pitch_change_threshold=args.threshold,
         min_segment_duration=args.min_duration,
         min_rms_db=args.silence_threshold,
-        pitch_smoothing=args.pitch_smoothing
+        pitch_smoothing=args.pitch_smoothing,
+        split_on_rms_dips=not args.no_rms_dip_split,
+        rms_dip_threshold_db=args.rms_dip_threshold,
+        min_dip_duration=args.min_dip_duration,
+        rms_window_ms=args.rms_window_ms
     )
 
     # Step 3: Build comprehensive pitch database

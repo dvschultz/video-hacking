@@ -23,8 +23,9 @@ if [ $# -lt 2 ]; then
     echo "  --min-reuse-gap N       Minimum segments between reuses (default: 5)"
     echo "  --max-reuses N          Maximum reuses per segment (default: 3)"
     echo "  --reuse-percentage N    Max reuse percentage (default: 0.3)"
-    echo "  --duration-weight N     Weight for duration matching (default: 0.6)"
-    echo "  --confidence-weight N   Weight for confidence matching (default: 0.4)"
+    echo "  --duration-weight N     Weight for duration matching (default: 0.3)"
+    echo "  --confidence-weight N   Weight for pitch confidence matching (default: 0.4)"
+    echo "  --consistency-weight N  Weight for loopability/consistency matching (default: 0.3)"
     echo "  --no-transposition      Disable pitch transposition"
     echo "  --max-transpose N       Maximum semitones to transpose (default: 12)"
     echo "  --no-combine-clips      Disable combining clips for duration"
@@ -50,7 +51,7 @@ if [ $# -lt 2 ]; then
     echo "  $0 guide.json source.json --no-transposition"
     echo ""
     echo "  # Adjust scoring weights:"
-    echo "  $0 guide.json source.json --duration-weight 0.7 --confidence-weight 0.3"
+    echo "  $0 guide.json source.json --duration-weight 0.4 --confidence-weight 0.4 --consistency-weight 0.2"
     exit 1
 fi
 
