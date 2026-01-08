@@ -24,6 +24,7 @@ if [ $# -lt 1 ]; then
     echo "  --fps N             Output frame rate (e.g., 24, 29.97). Will prompt if not specified."
     echo "  --auto-fps          Use smallest source frame rate automatically (no prompt)"
     echo "  --parallel N        Number of parallel workers for normalization (default: auto, max 8)"
+    echo "  --true-silence      Use black frames + muted audio for rests (instead of source silence clips)"
     echo "  --no-cleanup        Keep temporary files for debugging"
     echo ""
     echo "Examples:"

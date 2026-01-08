@@ -33,7 +33,7 @@ class PitchVideoAssembler:
 
     def __init__(self, match_plan_path: str, output_path: str, temp_dir: str = "data/temp",
                  target_width: int = None, target_height: int = None, target_fps: int = 24,
-                 parallel_workers: int = None):
+                 parallel_workers: int = None, use_true_silence: bool = False):
         """
         Initialize the assembler.
 
@@ -45,6 +45,8 @@ class PitchVideoAssembler:
             target_height: Target video height (None = auto-detect)
             target_fps: Target frame rate
             parallel_workers: Number of parallel workers for normalization (None = auto)
+            use_true_silence: If True, use black frames with muted audio for rests
+                              instead of source "silence" clips (default: False)
         """
         self.match_plan_path = Path(match_plan_path)
         self.output_path = Path(output_path)
@@ -55,6 +57,9 @@ class PitchVideoAssembler:
         self.target_width = target_width
         self.target_height = target_height
         self.target_fps = target_fps
+
+        # Silence handling
+        self.use_true_silence = use_true_silence
 
         # Parallel processing (default to CPU count, max 8 to avoid I/O saturation)
         if parallel_workers is None:
@@ -108,7 +113,7 @@ class PitchVideoAssembler:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
             width, height = map(int, result.stdout.strip().split(','))
             self.video_resolutions[video_path] = (width, height)
             return (width, height)
@@ -139,7 +144,7 @@ class PitchVideoAssembler:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
             fps_str = result.stdout.strip()
             if '/' in fps_str:
                 num, den = fps_str.split('/')
@@ -225,6 +230,9 @@ class PitchVideoAssembler:
         Returns:
             Tuple of (width, height) selected by user
         """
+        # Reset terminal settings in case subprocess messed them up
+        os.system('stty sane 2>/dev/null')
+
         print("\n=== Select Output Resolution ===")
         print("")
 
@@ -286,6 +294,9 @@ class PitchVideoAssembler:
         Returns:
             Frame rate selected by user
         """
+        # Reset terminal settings in case subprocess messed them up
+        os.system('stty sane 2>/dev/null')
+
         print("\n=== Select Output Frame Rate ===")
         print("")
 
@@ -554,13 +565,25 @@ class PitchVideoAssembler:
             print(f"  Match {match_idx}: MISSING - {match['guide_pitch_note']} - skipping")
             return []
 
-        # Handle rest segments - use verified silence clips from source database
+        # Handle rest segments
         if match['match_type'] == 'rest':
             duration = match['guide_duration']
             source_clips = match.get('source_clips', [])
 
+            # Use true silence (black frames + muted audio) if requested
+            if self.use_true_silence:
+                rest_clip = self.temp_dir / f"match_{match_idx:04d}_rest.mp4"
+                print(f"  Match {match_idx}: REST ({duration:.3f}s) [true silence]")
+
+                width = self.target_width or 1920
+                height = self.target_height or 1080
+                fps = self.target_fps or 24
+
+                self.generate_rest_clip(duration, str(rest_clip), width=width, height=height, fps=fps)
+                return [str(rest_clip)]
+
+            # Otherwise use verified silence clips from source database
             if source_clips:
-                # Use verified silence clips from source database
                 print(f"  Match {match_idx}: REST ({duration:.3f}s, {len(source_clips)} silence clip(s))")
                 clip_files = []
 
@@ -965,6 +988,11 @@ def main():
         default=None,
         help='Number of parallel workers for clip normalization (default: auto, max 8)'
     )
+    parser.add_argument(
+        '--true-silence',
+        action='store_true',
+        help='Use black frames with muted audio for rest segments instead of source silence clips'
+    )
 
     args = parser.parse_args()
 
@@ -1000,7 +1028,8 @@ def main():
         target_width=target_width,
         target_height=target_height,
         target_fps=target_fps,
-        parallel_workers=args.parallel
+        parallel_workers=args.parallel,
+        use_true_silence=args.true_silence
     )
 
     # Load match plan

@@ -246,6 +246,9 @@ class MIDIGuideConverter:
         Convert notes to pitch segment format matching guide_sequence.json structure.
         Includes rest segments for gaps between notes.
 
+        Handles overlapping notes by truncating earlier notes when a new note starts
+        (monophonic mode - only one note at a time in the output).
+
         Args:
             min_rest_duration: Minimum rest duration to include as segment (seconds)
 
@@ -255,16 +258,32 @@ class MIDIGuideConverter:
         segments = []
         current_time = 0.0
         segment_index = 0
+        skipped_overlaps = 0
 
         for note in self.notes:
+            note_start = note['start_time']
+            note_end = note['end_time']
+
+            # Handle overlap: if this note starts before current_time, it overlaps
+            if note_start < current_time:
+                # Skip notes that are completely within the previous note
+                if note_end <= current_time:
+                    skipped_overlaps += 1
+                    continue
+                # Truncate start of this note to avoid overlap
+                note_start = current_time
+                if note_end - note_start < 0.01:  # Skip if too short after truncation
+                    skipped_overlaps += 1
+                    continue
+
             # Check for rest before this note
-            gap = note['start_time'] - current_time
+            gap = note_start - current_time
             if gap >= min_rest_duration:
                 # Add rest segment
                 rest_segment = {
                     'index': segment_index,
                     'start_time': current_time,
-                    'end_time': note['start_time'],
+                    'end_time': note_start,
                     'duration': gap,
                     'pitch_hz': 0.0,
                     'pitch_midi': -1,  # Special marker for rest
@@ -282,9 +301,9 @@ class MIDIGuideConverter:
 
             segment = {
                 'index': segment_index,
-                'start_time': note['start_time'],
-                'end_time': note['end_time'],
-                'duration': note['duration'],
+                'start_time': note_start,
+                'end_time': note_end,
+                'duration': note_end - note_start,
                 'pitch_hz': float(pitch_hz),
                 'pitch_midi': pitch_midi,
                 'pitch_note': pitch_note,
@@ -293,12 +312,14 @@ class MIDIGuideConverter:
             }
             segments.append(segment)
             segment_index += 1
-            current_time = note['end_time']
+            current_time = note_end
 
         self.pitch_segments = segments
         note_count = sum(1 for s in segments if not s.get('is_rest', False))
         rest_count = sum(1 for s in segments if s.get('is_rest', False))
         print(f"Converted to {len(segments)} segments ({note_count} notes, {rest_count} rests)")
+        if skipped_overlaps > 0:
+            print(f"  Skipped {skipped_overlaps} overlapping notes (monophonic mode)")
         return segments
 
     def generate_audio_preview(self, output_path: str, sample_rate: int = 22050) -> Path:
