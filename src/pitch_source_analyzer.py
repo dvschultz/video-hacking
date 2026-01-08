@@ -2,8 +2,8 @@
 """
 Pitch Source Analyzer
 
-Analyzes a "source" video to build a comprehensive pitch database.
-Detects ALL pitches available in the video and indexes them for fast lookup.
+Analyzes source videos to build a comprehensive pitch database.
+Uses continuous pitch tracking to detect ALL pitches and silent sections.
 
 This creates the searchable database that we'll use to find matching clips
 for each note in the guide sequence.
@@ -19,55 +19,49 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
-# Import existing onset detection
-from onset_strength_analysis import OnsetStrengthAnalyzer
+# Import pitch change detection
+from pitch_change_detector import PitchChangeDetector
 from pitch_utils import (
     hz_to_midi, midi_to_note_name, round_to_nearest_midi,
     calculate_pitch_statistics, is_pitch_in_range
 )
 
-try:
-    import crepe
-    CREPE_AVAILABLE = True
-except ImportError:
-    CREPE_AVAILABLE = False
-    print("Warning: CREPE not available. Will use librosa.pyin instead.")
-
 
 class PitchSourceAnalyzer:
     """Analyzes source video to build searchable pitch database."""
 
-    def __init__(self, video_path: str, use_crepe: bool = True):
+    def __init__(self, video_path: str, pitch_method: str = 'crepe'):
         """
         Initialize the analyzer.
 
         Args:
             video_path: Path to source video file
-            use_crepe: Use CREPE for pitch detection (more accurate)
+            pitch_method: Pitch detection method ('crepe', 'basic-pitch', 'swift-f0', 'hybrid', or 'pyin')
         """
         self.video_path = Path(video_path)
         self.audio_path = None
-        self.use_crepe = use_crepe and CREPE_AVAILABLE
+        self.pitch_method = pitch_method
 
         self.audio = None
         self.sr = None
         self.fps = None
 
-        self.onset_analyzer = None
-        self.onset_times = None
-        self.onset_strength = None
-
         self.pitch_database = []
-        self.pitch_index = defaultdict(list)  # MIDI note -> list of clip IDs
+        self.pitch_index = defaultdict(list)  # MIDI note -> list of segment IDs
+        self.silence_segments = []  # Track silent sections
 
     def extract_audio(self, output_dir: str = "data/temp",
-                     sample_rate: int = 22050) -> Path:
+                     sample_rate: int = 22050,
+                     normalize: bool = False,
+                     target_lufs: float = -16.0) -> Path:
         """
         Extract audio from video file.
 
         Args:
             output_dir: Directory to save extracted audio
             sample_rate: Audio sample rate (22050 Hz is good for pitch detection)
+            normalize: If True, normalize audio loudness using EBU R128 standard
+            target_lufs: Target loudness in LUFS (default -16, broadcast standard)
 
         Returns:
             Path to extracted audio file
@@ -79,18 +73,35 @@ class PitchSourceAnalyzer:
         audio_path = output_dir / audio_filename
 
         print(f"Extracting audio from: {self.video_path}")
+        if normalize:
+            print(f"  Normalizing to {target_lufs} LUFS")
         print(f"Output: {audio_path}")
 
-        # Use ffmpeg to extract audio
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', str(self.video_path),
-            '-vn',  # No video
-            '-acodec', 'pcm_s16le',  # PCM 16-bit
-            '-ar', str(sample_rate),  # Sample rate
-            '-ac', '1',  # Mono
-            str(audio_path)
-        ]
+        # Build ffmpeg command
+        if normalize:
+            # Use loudnorm filter for EBU R128 normalization
+            # Single-pass mode with reasonable defaults
+            af_filter = f'loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=summary'
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(self.video_path),
+                '-vn',  # No video
+                '-af', af_filter,
+                '-acodec', 'pcm_s16le',  # PCM 16-bit
+                '-ar', str(sample_rate),  # Sample rate
+                '-ac', '1',  # Mono
+                str(audio_path)
+            ]
+        else:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(self.video_path),
+                '-vn',  # No video
+                '-acodec', 'pcm_s16le',  # PCM 16-bit
+                '-ar', str(sample_rate),  # Sample rate
+                '-ac', '1',  # Mono
+                str(audio_path)
+            ]
 
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -108,270 +119,200 @@ class PitchSourceAnalyzer:
 
         return audio_path
 
-    def detect_onsets(self, fps: int = 24, threshold: float = 0.12,
-                     power: float = 0.6) -> np.ndarray:
+    def analyze_continuous_pitch(self, fps: int = 24,
+                                  pitch_change_threshold: float = 50.0,
+                                  min_segment_duration: float = 0.1,
+                                  min_rms_db: float = -50.0,
+                                  pitch_smoothing: int = 0) -> List[Dict]:
         """
-        Detect ALL onset times in the source audio.
-
-        Uses a lower threshold than guide analysis to capture every possible clip.
+        Analyze continuous pitch throughout the source video.
 
         Args:
             fps: Video frame rate
-            threshold: Onset strength threshold (lower = more clips)
-            power: Power-law compression (lower = more sensitive)
+            pitch_change_threshold: Cents difference to trigger new segment
+            min_segment_duration: Minimum segment length in seconds
+            min_rms_db: Minimum RMS amplitude to detect silence
+            pitch_smoothing: Median filter window size (0=off, 5-7 recommended)
 
         Returns:
-            Array of onset times in seconds
+            List of pitch segment dictionaries
         """
         if self.audio_path is None:
             raise ValueError("Must extract audio first")
 
         self.fps = fps
 
-        print(f"\nDetecting onsets (threshold={threshold}, power={power})...")
-        print("Note: Using lower threshold to capture all possible clips")
+        print(f"\nAnalyzing continuous pitch (threshold={pitch_change_threshold} cents)...")
 
-        # Use existing onset detection code
-        self.onset_analyzer = OnsetStrengthAnalyzer(str(self.audio_path), sr=self.sr)
-        onset_strength = self.onset_analyzer.analyze(
-            analysis_rate=fps,
-            power=power,
-            smoothing_window_size=1,
-            smoothing_tolerance=0.2
+        # Use pitch change detector
+        detector = PitchChangeDetector(str(self.audio_path), sr=self.sr, pitch_method=self.pitch_method)
+
+        # Extract continuous pitch with optional smoothing
+        detector.extract_continuous_pitch(frame_time=0.01, pitch_smoothing_window=pitch_smoothing)
+
+        # Detect pitch segments (splits on pitch changes OR silence)
+        segments = detector.detect_pitch_segments(
+            pitch_change_threshold_cents=pitch_change_threshold,
+            min_segment_duration=min_segment_duration,
+            min_confidence=0.5,
+            min_rms_db=min_rms_db
         )
 
-        self.onset_strength = onset_strength
-        self.onset_times = self.onset_analyzer.get_cut_times(threshold=threshold)
+        # Convert to dictionaries
+        pitch_segments = detector.segments_to_dict(segments)
 
-        print(f"Detected {len(self.onset_times)} onsets in source video")
+        # Track verified silence gaps between segments
+        self._extract_silence_gaps(pitch_segments, silence_threshold_db=min_rms_db)
 
-        if len(self.onset_times) > 0:
-            print(f"First onset: {self.onset_times[0]:.3f}s")
-            print(f"Last onset: {self.onset_times[-1]:.3f}s")
-            avg_gap = np.mean(np.diff(self.onset_times)) if len(self.onset_times) > 1 else 0
-            print(f"Average gap between onsets: {avg_gap:.3f}s")
+        print(f"Detected {len(pitch_segments)} pitch segments")
+        print(f"Detected {len(self.silence_segments)} verified silent gaps")
 
-        return self.onset_times
+        return pitch_segments
 
-    def extract_pitch_crepe(self, audio_segment: np.ndarray,
-                           sr: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _get_rms_db(self, start_time: float, end_time: float) -> float:
         """
-        Extract pitch using CREPE (deep learning method).
+        Calculate RMS amplitude in dB for a time range.
 
         Args:
-            audio_segment: Audio waveform segment
-            sr: Sample rate
+            start_time: Start time in seconds
+            end_time: End time in seconds
 
         Returns:
-            (pitch_hz, confidence) arrays
+            RMS amplitude in dB (negative values, -inf for silence)
         """
-        if not CREPE_AVAILABLE:
-            raise ImportError("CREPE not available")
+        if self.audio is None or self.sr is None:
+            return 0.0
 
-        # CREPE expects at least 1024 samples
-        if len(audio_segment) < 1024:
-            return np.array([]), np.array([])
-
-        # Run CREPE pitch detection
-        time, frequency, confidence, activation = crepe.predict(
-            audio_segment,
-            sr,
-            viterbi=True,  # Temporal smoothing
-            model_capacity='full',  # Most accurate model
-            step_size=10  # 10ms steps
-        )
-
-        return frequency, confidence
-
-    def extract_pitch_pyin(self, audio_segment: np.ndarray,
-                          sr: int) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Extract pitch using librosa's pyin (fallback method).
-
-        Args:
-            audio_segment: Audio waveform segment
-            sr: Sample rate
-
-        Returns:
-            (pitch_hz, voiced_flag) arrays
-        """
-        # pyin returns frequency and voiced flag
-        f0, voiced_flag, voiced_probs = librosa.pyin(
-            audio_segment,
-            fmin=librosa.note_to_hz('C2'),  # ~65 Hz (low male voice)
-            fmax=librosa.note_to_hz('C6'),  # ~1046 Hz (high female voice)
-            sr=sr,
-            frame_length=2048
-        )
-
-        # Use voiced probabilities as confidence
-        confidence = voiced_probs
-
-        # Replace unvoiced frames with 0
-        frequency = np.where(voiced_flag, f0, 0)
-
-        return frequency, confidence
-
-    def analyze_clip_pitch(self, clip_id: int, start_time: float, end_time: float,
-                          min_confidence: float = 0.5,
-                          min_rms_db: float = -40.0) -> Optional[Dict]:
-        """
-        Analyze pitch for a single clip in the source database.
-
-        Args:
-            clip_id: Unique clip identifier
-            start_time: Clip start time in seconds
-            end_time: Clip end time in seconds
-            min_confidence: Minimum confidence threshold
-            min_rms_db: Minimum RMS amplitude in dB (default: -40dB, filters silence)
-
-        Returns:
-            Dictionary with pitch statistics and video info, or None if invalid
-        """
-        duration = end_time - start_time
-
-        # Skip very short segments (< 50ms)
-        if duration < 0.05:
-            return None
-
-        # Extract audio segment
         start_sample = int(start_time * self.sr)
         end_sample = int(end_time * self.sr)
+
+        # Clamp to valid range
+        start_sample = max(0, start_sample)
+        end_sample = min(len(self.audio), end_sample)
+
+        if end_sample <= start_sample:
+            return -100.0  # Treat as silent
+
         audio_segment = self.audio[start_sample:end_sample]
+        rms = np.sqrt(np.mean(audio_segment ** 2))
 
-        if len(audio_segment) < 100:  # Too short
-            return None
+        if rms < 1e-10:
+            return -100.0  # Effectively silent
 
-        # Check if segment is silence (RMS amplitude too low)
-        rms = np.sqrt(np.mean(audio_segment**2))
-        rms_db = 20 * np.log10(rms + 1e-10)  # Convert to dB (add epsilon to avoid log(0))
+        return 20 * np.log10(rms)
 
-        if rms_db < min_rms_db:
-            # Segment is too quiet, likely silence
-            return None
-
-        # Extract pitch
-        try:
-            if self.use_crepe:
-                pitch_hz, confidence = self.extract_pitch_crepe(audio_segment, self.sr)
-            else:
-                pitch_hz, confidence = self.extract_pitch_pyin(audio_segment, self.sr)
-        except Exception as e:
-            # Silently skip failed segments (too verbose otherwise)
-            return None
-
-        if len(pitch_hz) == 0:
-            return None
-
-        # Calculate pitch statistics
-        stats = calculate_pitch_statistics(
-            pitch_hz,
-            confidence,
-            confidence_threshold=min_confidence
-        )
-
-        # Check if we have enough valid pitch data
-        if stats['num_valid_frames'] < 3:
-            return None
-
-        # Check if pitch is in reasonable singing range
-        if not is_pitch_in_range(stats['median_hz'], 'C2', 'C6'):
-            return None
-
-        # Calculate video frame numbers
-        video_start_frame = int(start_time * self.fps)
-        video_end_frame = int(end_time * self.fps)
-
-        # Get onset strength for this clip
-        onset_frame = int(start_time * self.fps)
-        if onset_frame < len(self.onset_strength):
-            onset_strength_val = float(self.onset_strength[onset_frame])
-        else:
-            onset_strength_val = 0.0
-
-        return {
-            'clip_id': clip_id,
-            'start_time': start_time,
-            'end_time': end_time,
-            'duration': duration,
-            'pitch_hz': stats['median_hz'],
-            'pitch_midi': stats['median_midi'],
-            'pitch_note': stats['note_name'],
-            'pitch_confidence': stats['mean_confidence'],
-            'pitch_stability': stats['stability'],
-            'video_start_frame': video_start_frame,
-            'video_end_frame': video_end_frame,
-            'onset_strength': onset_strength_val,
-            'num_pitch_frames': stats['num_valid_frames']
-        }
-
-    def build_database(self, min_confidence: float = 0.5,
-                      max_clips: Optional[int] = None) -> List[Dict]:
+    def _extract_silence_gaps(self, pitch_segments: List[Dict], silence_threshold_db: float = -40.0):
         """
-        Build comprehensive pitch database from all onsets.
+        Extract verified silent gaps between pitch segments.
+
+        Only includes gaps where the audio RMS is below the silence threshold.
 
         Args:
-            min_confidence: Minimum pitch confidence threshold
-            max_clips: Optional limit on number of clips (for testing)
+            pitch_segments: List of pitch segment dictionaries
+            silence_threshold_db: Maximum RMS in dB to consider as silence (default -40)
+        """
+        self.silence_segments = []
+
+        if len(pitch_segments) < 2:
+            return
+
+        verified_count = 0
+        rejected_count = 0
+
+        # Find gaps between segments
+        for i in range(len(pitch_segments) - 1):
+            seg1 = pitch_segments[i]
+            seg2 = pitch_segments[i + 1]
+
+            gap_start = seg1['end_time']
+            gap_end = seg2['start_time']
+            gap_duration = gap_end - gap_start
+
+            # Only track significant gaps (>50ms)
+            if gap_duration > 0.05:
+                # Verify audio is actually silent
+                rms_db = self._get_rms_db(gap_start, gap_end)
+
+                if rms_db < silence_threshold_db:
+                    self.silence_segments.append({
+                        'start_time': gap_start,
+                        'end_time': gap_end,
+                        'duration': gap_duration,
+                        'video_start_frame': int(gap_start * self.fps),
+                        'video_end_frame': int(gap_end * self.fps),
+                        'rms_db': rms_db
+                    })
+                    verified_count += 1
+                else:
+                    rejected_count += 1
+
+        print(f"  Verified {verified_count} silent gaps (rejected {rejected_count} with audio)")
+
+    def build_database(self, pitch_segments: List[Dict]) -> List[Dict]:
+        """
+        Build comprehensive pitch database from pitch segments.
+
+        Args:
+            pitch_segments: List of pitch segment dictionaries from continuous pitch analysis
 
         Returns:
-            List of clip dictionaries
+            List of database entries with video frame info and volume added
         """
-        if self.onset_times is None or len(self.onset_times) == 0:
-            raise ValueError("Must detect onsets first")
+        print(f"\nBuilding pitch database from {len(pitch_segments)} segments...")
 
-        print(f"\nBuilding pitch database from {len(self.onset_times)} onsets...")
+        database = []
 
-        clips = []
-        clip_id = 0
+        for i, seg in enumerate(pitch_segments):
+            # Add video frame information
+            video_start_frame = int(seg['start_time'] * self.fps)
+            video_end_frame = int(seg['end_time'] * self.fps)
 
-        # Analyze each onset-to-onset segment
-        num_to_process = len(self.onset_times)
-        if max_clips is not None:
-            num_to_process = min(num_to_process, max_clips)
+            # Calculate median RMS volume for this segment
+            start_sample = int(seg['start_time'] * self.sr)
+            end_sample = int(seg['end_time'] * self.sr)
+            audio_segment = self.audio[start_sample:end_sample]
 
-        for i in range(num_to_process):
-            start_time = self.onset_times[i]
+            # Calculate RMS in dB
+            rms = np.sqrt(np.mean(audio_segment**2))
+            rms_db = 20 * np.log10(rms + 1e-10)
 
-            # End time is next onset, or end of audio
-            if i < len(self.onset_times) - 1:
-                end_time = self.onset_times[i + 1]
-            else:
-                end_time = len(self.audio) / self.sr
+            entry = {
+                'segment_id': i,
+                'start_time': seg['start_time'],
+                'end_time': seg['end_time'],
+                'duration': seg['duration'],
+                'pitch_hz': seg['pitch_hz'],
+                'pitch_midi': seg['pitch_midi'],
+                'pitch_note': seg['pitch_note'],
+                'pitch_confidence': seg['pitch_confidence'],
+                'rms_db': float(rms_db),
+                'video_start_frame': video_start_frame,
+                'video_end_frame': video_end_frame
+            }
 
-            # Analyze pitch for this clip
-            clip = self.analyze_clip_pitch(clip_id, start_time, end_time, min_confidence)
+            database.append(entry)
 
-            if clip is not None:
-                clips.append(clip)
-                clip_id += 1
+        self.pitch_database = database
+        print(f"Database complete: {len(database)} segments")
 
-            # Progress indicator
-            if (i + 1) % 100 == 0:
-                print(f"  Processed {i + 1}/{num_to_process} onsets, found {len(clips)} valid clips...")
-
-        print(f"Database complete: {len(clips)} valid clips from {num_to_process} onsets")
-        print(f"Success rate: {len(clips)/num_to_process*100:.1f}%")
-
-        self.pitch_database = clips
-        return clips
+        return database
 
     def build_pitch_index(self):
         """
         Build MIDI note index for fast pitch lookup.
 
-        Creates a mapping: MIDI note number -> list of clip IDs with that pitch
+        Creates a mapping: MIDI note number -> list of segment IDs with that pitch
         """
         print("\nBuilding pitch index...")
 
         self.pitch_index = defaultdict(list)
 
-        for clip in self.pitch_database:
-            midi = clip['pitch_midi']
-            clip_id = clip['clip_id']
-            self.pitch_index[midi].append(clip_id)
+        for segment in self.pitch_database:
+            midi = segment['pitch_midi']
+            segment_id = segment['segment_id']
+            self.pitch_index[midi].append(segment_id)
 
-        # Sort clip IDs for each MIDI note
+        # Sort segment IDs for each MIDI note
         for midi in self.pitch_index:
             self.pitch_index[midi].sort()
 
@@ -386,91 +327,184 @@ class PitchSourceAnalyzer:
                   f"{midi_to_note_name(max_midi)} (MIDI {max_midi})")
 
             # Find most common pitches
-            pitch_counts = [(midi, len(clips)) for midi, clips in self.pitch_index.items()]
+            pitch_counts = [(midi, len(segments)) for midi, segments in self.pitch_index.items()]
             pitch_counts.sort(key=lambda x: x[1], reverse=True)
 
             print(f"\nMost common pitches:")
             for midi, count in pitch_counts[:10]:
-                print(f"  {midi_to_note_name(midi)}: {count} clips")
+                print(f"  {midi_to_note_name(midi)}: {count} segments")
 
-    def save_database(self, output_path: str):
+    def save_database(self, output_path: str, append: bool = False):
         """
         Save pitch database to JSON file.
 
         Args:
             output_path: Output JSON file path
+            append: If True, merge with existing database instead of overwriting
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Convert defaultdict to regular dict for JSON serialization
-        pitch_index_dict = {str(midi): clips for midi, clips in self.pitch_index.items()}
+        # Load existing data if appending
+        existing_data = None
+        if append and output_path.exists():
+            print(f"\nLoading existing database from: {output_path}")
+            with open(output_path, 'r') as f:
+                existing_data = json.load(f)
+            print(f"  Found {existing_data['num_segments']} existing segments from {len(existing_data.get('source_videos', []))} videos")
 
-        # Prepare output data
-        data = {
+        # Calculate total durations for this video
+        total_duration = float(self.audio.shape[0] / self.sr) if self.audio is not None else 0
+        musical_duration = sum(seg['duration'] for seg in self.pitch_database)
+        silence_duration = sum(seg['duration'] for seg in self.silence_segments)
+
+        # Store video source info with each segment
+        video_info = {
             'video_path': str(self.video_path),
             'audio_path': str(self.audio_path),
             'fps': self.fps,
             'sample_rate': self.sr,
-            'pitch_detection_method': 'CREPE' if self.use_crepe else 'pYIN',
-            'num_clips': len(self.pitch_database),
-            'num_unique_pitches': len(self.pitch_index),
-            'total_duration': float(self.audio.shape[0] / self.sr) if self.audio is not None else 0,
-            'pitch_database': self.pitch_database,
-            'pitch_index': pitch_index_dict
+            'pitch_detection_method': self.pitch_method.upper(),
+            'total_duration': total_duration,
+            'musical_duration': musical_duration,
+            'silence_duration': silence_duration
         }
+
+        # Add video_path to each segment for tracking
+        for seg in self.pitch_database:
+            seg['video_path'] = str(self.video_path)
+        for seg in self.silence_segments:
+            seg['video_path'] = str(self.video_path)
+
+        # Merge with existing data if appending
+        if existing_data:
+            # Renumber segment IDs to avoid conflicts
+            id_offset = existing_data['num_segments']
+            print(f"  Renumbering new segments starting from ID {id_offset}")
+
+            for seg in self.pitch_database:
+                seg['segment_id'] += id_offset
+
+            # Merge databases
+            combined_database = existing_data['pitch_database'] + self.pitch_database
+            combined_silences = existing_data.get('silence_segments', []) + self.silence_segments
+
+            # Rebuild pitch index from combined database
+            combined_pitch_index = defaultdict(list)
+            for segment in combined_database:
+                midi = segment['pitch_midi']
+                segment_id = segment['segment_id']
+                combined_pitch_index[midi].append(segment_id)
+
+            # Sort segment IDs for each MIDI note
+            for midi in combined_pitch_index:
+                combined_pitch_index[midi].sort()
+
+            # Track source videos
+            source_videos = existing_data.get('source_videos', [])
+            source_videos.append(video_info)
+
+            # Update aggregated statistics
+            total_musical = existing_data.get('total_musical_duration', 0) + musical_duration
+            total_silence = existing_data.get('total_silence_duration', 0) + silence_duration
+
+            # Convert pitch index to dict
+            pitch_index_dict = {str(midi): segment_ids for midi, segment_ids in combined_pitch_index.items()}
+
+            # Prepare merged output data
+            data = {
+                'source_videos': source_videos,
+                'num_videos': len(source_videos),
+                'num_segments': len(combined_database),
+                'num_unique_pitches': len(combined_pitch_index),
+                'num_silence_gaps': len(combined_silences),
+                'total_musical_duration': total_musical,
+                'total_silence_duration': total_silence,
+                'pitch_database': combined_database,
+                'silence_segments': combined_silences,
+                'pitch_index': pitch_index_dict
+            }
+
+            self.pitch_database = combined_database
+            self.silence_segments = combined_silences
+            self.pitch_index = combined_pitch_index
+
+        else:
+            # New database (not appending)
+            # Convert defaultdict to regular dict for JSON serialization
+            pitch_index_dict = {str(midi): segment_ids for midi, segment_ids in self.pitch_index.items()}
+
+            # Prepare output data
+            data = {
+                'source_videos': [video_info],
+                'num_videos': 1,
+                'num_segments': len(self.pitch_database),
+                'num_unique_pitches': len(self.pitch_index),
+                'num_silence_gaps': len(self.silence_segments),
+                'total_musical_duration': musical_duration,
+                'total_silence_duration': silence_duration,
+                'pitch_database': self.pitch_database,
+                'silence_segments': self.silence_segments,
+                'pitch_index': pitch_index_dict
+            }
 
         # Save to JSON
         with open(output_path, 'w') as f:
             json.dump(data, f, indent=2)
 
         print(f"\nSaved pitch database to: {output_path}")
-        print(f"Total clips: {len(self.pitch_database)}")
+        if append and existing_data:
+            print(f"Total videos in database: {data['num_videos']}")
+        print(f"Total segments: {len(self.pitch_database)}")
         print(f"Unique pitches: {len(self.pitch_index)}")
+        print(f"Silent gaps: {len(self.silence_segments)}")
 
         # Print statistics
         if len(self.pitch_database) > 0:
-            durations = [clip['duration'] for clip in self.pitch_database]
-            confidences = [clip['pitch_confidence'] for clip in self.pitch_database]
+            durations = [seg['duration'] for seg in self.pitch_database]
+            confidences = [seg['pitch_confidence'] for seg in self.pitch_database]
 
-            print(f"\nClip statistics:")
-            print(f"  Average duration: {np.mean(durations):.3f}s")
+            print(f"\nCombined database statistics:")
+            print(f"  Total segments: {len(self.pitch_database)}")
+            print(f"  Average segment duration: {np.mean(durations):.3f}s")
             print(f"  Duration range: {np.min(durations):.3f}s to {np.max(durations):.3f}s")
             print(f"  Average confidence: {np.mean(confidences):.3f}")
-            print(f"  Total musical duration: {sum(durations):.2f}s")
+            print(f"  Total musical duration: {data['total_musical_duration']:.2f}s")
+            print(f"  Total silence duration: {data['total_silence_duration']:.2f}s")
 
     def print_database_summary(self, samples_per_pitch: int = 3):
         """
         Print summary of pitch database.
 
         Args:
-            samples_per_pitch: Number of sample clips to show per pitch
+            samples_per_pitch: Number of sample segments to show per pitch
         """
         if len(self.pitch_database) == 0:
-            print("No clips in database")
+            print("No segments in database")
             return
 
         print(f"\n=== Pitch Database Summary ===")
-        print(f"Total clips: {len(self.pitch_database)}")
+        print(f"Total segments: {len(self.pitch_database)}")
         print(f"Unique pitches: {len(self.pitch_index)}")
+        print(f"Silent gaps: {len(self.silence_segments)}")
 
-        # Sample clips from each pitch
-        print(f"\nSample clips (showing {samples_per_pitch} per pitch):")
+        # Sample segments from each pitch
+        print(f"\nSample segments (showing {samples_per_pitch} per pitch):")
 
         # Sort pitches by MIDI number
         sorted_pitches = sorted(self.pitch_index.keys())
 
         for midi in sorted_pitches[:15]:  # Show first 15 pitches
             note = midi_to_note_name(midi)
-            clip_ids = self.pitch_index[midi]
+            segment_ids = self.pitch_index[midi]
 
-            print(f"\n{note} (MIDI {midi}): {len(clip_ids)} clips")
+            print(f"\n{note} (MIDI {midi}): {len(segment_ids)} segments")
 
-            # Show sample clips
-            for clip_id in clip_ids[:samples_per_pitch]:
-                clip = self.pitch_database[clip_id]
-                print(f"  Clip {clip_id}: {clip['start_time']:.2f}-{clip['end_time']:.2f}s, "
-                      f"dur={clip['duration']:.3f}s, conf={clip['pitch_confidence']:.3f}")
+            # Show sample segments
+            for segment_id in segment_ids[:samples_per_pitch]:
+                segment = self.pitch_database[segment_id]
+                print(f"  Segment {segment_id}: {segment['start_time']:.2f}-{segment['end_time']:.2f}s, "
+                      f"dur={segment['duration']:.3f}s, conf={segment['pitch_confidence']:.3f}")
 
         if len(sorted_pitches) > 15:
             print(f"\n... and {len(sorted_pitches) - 15} more pitches")
@@ -501,24 +535,38 @@ def main():
     parser.add_argument(
         '--threshold',
         type=float,
-        default=0.12,
-        help='Onset detection threshold (default: 0.12, lower = more clips)'
+        default=50.0,
+        help='Pitch change threshold in cents (default: 50, lower = more segments)'
     )
     parser.add_argument(
-        '--min-confidence',
+        '--min-duration',
         type=float,
-        default=0.5,
-        help='Minimum pitch confidence (default: 0.5)'
+        default=0.1,
+        help='Minimum segment duration in seconds (default: 0.1)'
+    )
+    parser.add_argument(
+        '--silence-threshold',
+        type=float,
+        default=-50.0,
+        help='Silence threshold in dB (default: -50, lower = more permissive)'
+    )
+    parser.add_argument(
+        '--pitch-smoothing',
+        type=int,
+        default=0,
+        help='Pitch smoothing window size (0=off, 5-7 recommended to reduce vibrato/waver)'
+    )
+    parser.add_argument(
+        '--pitch-method',
+        type=str,
+        default='crepe',
+        choices=['crepe', 'basic-pitch', 'swift-f0', 'hybrid', 'pyin'],
+        help='Pitch detection method (default: crepe). Options: crepe (accurate), basic-pitch (multipitch), swift-f0 (fast CPU), hybrid (crepe+swift-f0), pyin (fallback)'
     )
     parser.add_argument(
         '--use-pyin',
         action='store_true',
-        help='Use pYIN instead of CREPE for pitch detection'
-    )
-    parser.add_argument(
-        '--max-clips',
-        type=int,
-        help='Maximum number of clips to process (for testing)'
+        help='(Deprecated) Use pYIN instead of CREPE - use --pitch-method pyin instead'
     )
     parser.add_argument(
         '--temp-dir',
@@ -526,28 +574,61 @@ def main():
         default='data/temp',
         help='Temporary directory for extracted audio'
     )
+    parser.add_argument(
+        '--append',
+        action='store_true',
+        help='Append to existing database instead of overwriting (allows combining multiple source videos)'
+    )
+    parser.add_argument(
+        '--normalize',
+        action='store_true',
+        help='Normalize audio loudness before analysis (recommended for consistent silence detection)'
+    )
+    parser.add_argument(
+        '--target-lufs',
+        type=float,
+        default=-16.0,
+        help='Target loudness in LUFS when normalizing (default: -16, broadcast standard)'
+    )
 
     args = parser.parse_args()
 
     print("=== Pitch Source Database Builder ===\n")
     print(f"Source video: {args.video}")
     print(f"Output: {args.output}")
-    print(f"Pitch detection: {'pYIN' if args.use_pyin else 'CREPE'}\n")
+
+    # Handle deprecated --use-pyin flag
+    pitch_method = args.pitch_method
+    if args.use_pyin:
+        pitch_method = 'pyin'
+        print("Note: --use-pyin is deprecated, use --pitch-method pyin instead")
+
+    print(f"Pitch detection: {pitch_method.upper()}")
+    if args.normalize:
+        print(f"Audio normalization: ON (target {args.target_lufs} LUFS)")
+    print()
 
     # Initialize analyzer
-    analyzer = PitchSourceAnalyzer(args.video, use_crepe=not args.use_pyin)
+    analyzer = PitchSourceAnalyzer(args.video, pitch_method=pitch_method)
 
-    # Step 1: Extract audio
-    analyzer.extract_audio(output_dir=args.temp_dir)
+    # Step 1: Extract audio (with optional normalization)
+    analyzer.extract_audio(
+        output_dir=args.temp_dir,
+        normalize=args.normalize,
+        target_lufs=args.target_lufs
+    )
 
-    # Step 2: Detect ALL onsets (lower threshold for more coverage)
-    analyzer.detect_onsets(fps=args.fps, threshold=args.threshold)
+    # Step 2: Analyze continuous pitch
+    pitch_segments = analyzer.analyze_continuous_pitch(
+        fps=args.fps,
+        pitch_change_threshold=args.threshold,
+        min_segment_duration=args.min_duration,
+        min_rms_db=args.silence_threshold,
+        pitch_smoothing=args.pitch_smoothing
+    )
 
     # Step 3: Build comprehensive pitch database
-    analyzer.build_database(
-        min_confidence=args.min_confidence,
-        max_clips=args.max_clips
-    )
+    analyzer.build_database(pitch_segments)
 
     # Step 4: Build pitch index for fast lookup
     analyzer.build_pitch_index()
@@ -556,7 +637,7 @@ def main():
     analyzer.print_database_summary(samples_per_pitch=3)
 
     # Step 6: Save database
-    analyzer.save_database(args.output)
+    analyzer.save_database(args.output, append=args.append)
 
     print("\n=== Database Building Complete ===")
 

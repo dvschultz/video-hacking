@@ -17,16 +17,37 @@ if [ $# -lt 1 ]; then
     echo "Usage: $0 <source_video.mp4> [options]"
     echo ""
     echo "Options:"
+    echo "  --output PATH        Output JSON path (default: data/segments/source_database.json)"
+    echo "  --append             Append to existing database instead of overwriting"
+    echo "                       Use this to combine multiple source videos into one database"
     echo "  --fps N              Video frame rate (default: 24)"
-    echo "  --threshold N        Onset threshold (default: 0.12, lower = more clips)"
-    echo "  --min-confidence N   Min pitch confidence (default: 0.5)"
-    echo "  --use-pyin           Use pYIN instead of CREPE"
-    echo "  --max-clips N        Limit number of clips (for testing)"
+    echo "  --threshold N        Pitch change threshold in cents (default: 50)"
+    echo "                       Lower = more segments, Higher = fewer segments"
+    echo "  --min-duration N     Minimum segment duration (default: 0.1s)"
+    echo "  --silence-threshold N  Silence detection threshold in dB (default: -50)"
+    echo "                       Lower = more permissive, detects quieter sounds"
+    echo "  --pitch-smoothing N  Median filter window size (default: 0=off)"
+    echo "                       Try 5-7 to reduce vibrato/waver"
+    echo "  --pitch-method METHOD  Pitch detection algorithm (default: crepe)"
+    echo "                       Options: crepe, swift-f0, basic-pitch, hybrid, pyin"
+    echo "  --normalize          Normalize audio loudness before analysis (recommended)"
+    echo "  --target-lufs N      Target loudness in LUFS when normalizing (default: -16)"
+    echo "  --use-pyin           (Deprecated) Use pYIN - prefer --pitch-method pyin"
     echo ""
-    echo "Example:"
-    echo "  $0 data/input/singing_source.mp4"
-    echo "  $0 data/input/singing_source.mp4 --threshold 0.1 --fps 30"
-    echo "  $0 data/input/singing_source.mp4 --max-clips 500  # Test mode"
+    echo "Examples:"
+    echo "  # Single video with normalization:"
+    echo "  $0 data/input/singing_source.mp4 --normalize"
+    echo ""
+    echo "  # Multiple videos combined into one database:"
+    echo "  $0 video1.mp4                    # Create new database"
+    echo "  $0 video2.mp4 --append           # Add to database"
+    echo "  $0 video3.mp4 --append           # Add more clips"
+    echo ""
+    echo "  # Other examples:"
+    echo "  $0 data/input/singing_source.mp4 --output data/segments/source1.json"
+    echo "  $0 data/input/singing_source.mp4 --threshold 75  # Fewer segments"
+    echo "  $0 data/input/singing_source.mp4 --pitch-method hybrid  # Best accuracy"
+    echo "  $0 data/input/singing_source.mp4 --pitch-smoothing 5  # Reduce waver"
     exit 1
 fi
 
@@ -44,6 +65,14 @@ OUTPUT_DIR="data/segments"
 TEMP_DIR="data/temp"
 OUTPUT_JSON="$OUTPUT_DIR/source_database.json"
 
+# Check if user provided custom output path
+for arg in "$@"; do
+    if [[ "$arg" == "--output" ]]; then
+        CUSTOM_OUTPUT=true
+        break
+    fi
+done
+
 # Create directories
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$TEMP_DIR"
@@ -58,37 +87,34 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Step 1: Building pitch database from source video${NC}"
+echo -e "${GREEN}Building pitch database from source video${NC}"
 echo "Input: $SOURCE_VIDEO"
-echo "Output: $OUTPUT_JSON"
-echo ""
-echo "Note: This may take a while for long videos..."
-echo "      Use --max-clips 500 for quick testing"
-echo ""
 
-$PYTHON_CMD src/pitch_source_analyzer.py \
-    --video "$SOURCE_VIDEO" \
-    --output "$OUTPUT_JSON" \
-    --temp-dir "$TEMP_DIR" \
-    "$@"
+# Build command with conditional output flag
+if [ -z "$CUSTOM_OUTPUT" ]; then
+    echo "Output: $OUTPUT_JSON"
+    echo ""
+    $PYTHON_CMD src/pitch_source_analyzer.py \
+        --video "$SOURCE_VIDEO" \
+        --output "$OUTPUT_JSON" \
+        --temp-dir "$TEMP_DIR" \
+        "$@"
+else
+    # Let user's --output flag pass through
+    echo "Output: (custom path specified)"
+    echo ""
+    $PYTHON_CMD src/pitch_source_analyzer.py \
+        --video "$SOURCE_VIDEO" \
+        --temp-dir "$TEMP_DIR" \
+        "$@"
 
-echo ""
-echo -e "${GREEN}Step 2: Creating MIDI preview video (optional)${NC}"
-echo ""
-
-if [ -f "$OUTPUT_JSON" ]; then
-    read -p "Generate preview video? This helps verify pitch detection. (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        PREVIEW_VIDEO="$OUTPUT_DIR/source_midi_preview.mp4"
-        $PYTHON_CMD src/pitch_video_preview.py \
-            --video "$SOURCE_VIDEO" \
-            --pitch-json "$OUTPUT_JSON" \
-            --output "$PREVIEW_VIDEO"
-        echo "Preview video saved: $PREVIEW_VIDEO"
-    else
-        echo "Skipping preview video generation."
-    fi
+    # Extract custom output path for status display
+    for i in "${!BASH_ARGV[@]}"; do
+        if [[ "${BASH_ARGV[$i]}" == "--output" ]]; then
+            OUTPUT_JSON="${BASH_ARGV[$((i-1))]}"
+            break
+        fi
+    done
 fi
 
 echo ""
@@ -96,23 +122,21 @@ echo -e "${GREEN}=== Database Building Complete ===${NC}"
 echo ""
 echo "Results saved to:"
 echo "  - Pitch database: $OUTPUT_JSON"
-if [ -f "$OUTPUT_DIR/source_midi_preview.mp4" ]; then
-    echo "  - Preview video: $OUTPUT_DIR/source_midi_preview.mp4"
-fi
 echo ""
 echo "Database info:"
 if [ -f "$OUTPUT_JSON" ]; then
     # Extract key stats from JSON
-    NUM_CLIPS=$(grep -o '"num_clips": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
+    NUM_SEGMENTS=$(grep -o '"num_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
     NUM_PITCHES=$(grep -o '"num_unique_pitches": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
+    NUM_SILENCES=$(grep -o '"num_silence_gaps": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
 
-    echo "  - Total clips: $NUM_CLIPS"
+    echo "  - Total segments: $NUM_SEGMENTS"
     echo "  - Unique pitches: $NUM_PITCHES"
+    echo "  - Silent gaps: $NUM_SILENCES"
 fi
 echo ""
 echo "Next steps:"
 echo "  1. Review database statistics above"
-echo "  2. Ensure you have clips for needed pitch range"
-echo "  3. Run pitch matcher to match guide sequence to source clips"
-echo "  4. If missing pitches, adjust --threshold to capture more clips"
+echo "  2. Ensure you have segments for needed pitch range"
+echo "  3. Run pitch matcher to match guide sequence to source segments"
 echo ""

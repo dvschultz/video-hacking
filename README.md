@@ -185,13 +185,59 @@ Create videos that match the pitch sequence of a guide vocal by recutting source
 
 ### Quick Start
 
+**Step 1: Create guide sequence** from either a video or MIDI file:
+
+*Option A: From video* (extracts pitch from singing):
 ```bash
-# Analyze guide video to extract pitch sequence
 ./test_pitch_guide.sh data/input/guide_video.mp4
 
 # This creates:
 # - data/segments/guide_sequence.json (pitch data)
 # - data/segments/guide_midi_preview.mp4 (verification video)
+```
+
+*Option B: From MIDI file* (uses exact note data):
+```bash
+# First, list available channels in the MIDI file
+./test_midi_guide.sh data/input/melody.mid 0 --list-channels
+
+# Then convert the desired channel (e.g., channel 1)
+./test_midi_guide.sh data/input/melody.mid 1
+
+# This creates:
+# - data/segments/guide_sequence.json (pitch data)
+# - data/temp/melody_midi_preview.wav (audio preview)
+```
+
+**Step 2: Build source video database** with pitch-indexed segments:
+```bash
+# Single video:
+./test_pitch_source.sh data/input/source_video.mp4
+
+# Batch process entire folder:
+./batch_pitch_source.sh /path/to/videos/folder
+
+# This creates:
+# - data/segments/source_database.json (searchable pitch database)
+# Contains pitch, timestamps, volume, and silence gaps
+```
+
+**Step 3: Match guide sequence to source database:**
+```bash
+./test_pitch_matcher.sh \
+  data/segments/guide_sequence.json \
+  data/segments/source_database.json
+
+# This creates:
+# - data/segments/match_plan.json (matching instructions for video assembly)
+```
+
+**Step 4: Assemble final video:**
+```bash
+./test_pitch_video_assembly.sh data/segments/match_plan.json
+
+# This creates:
+# - data/output/pitch_matched_video.mp4 (final assembled video)
 ```
 
 ### Pitch Detection Methods
@@ -308,6 +354,37 @@ open data/segments/guide_midi_preview.mp4
 - `guide_sequence.json` - Pitch sequence data (time, Hz, MIDI note, confidence)
 - `guide_midi_preview.mp4` - Video with MIDI playback for verification
 
+### Using MIDI Files as Guide
+
+Instead of extracting pitch from a video, you can use a MIDI file directly:
+
+```bash
+./test_midi_guide.sh data/input/melody.mid <channel> [options]
+```
+
+**Options:**
+- `--list-channels` - Show available channels in the MIDI file
+- `--min-rest N` - Minimum rest duration to preserve (default: 0.1s)
+- `--sample-rate N` - Audio preview sample rate (default: 22050)
+- `--no-audio` - Skip audio preview generation
+
+**Examples:**
+```bash
+# List what's in the MIDI file
+./test_midi_guide.sh song.mid 0 --list-channels
+
+# Convert channel 1 with default settings
+./test_midi_guide.sh song.mid 1
+
+# Convert with smaller rest threshold (keeps more gaps)
+./test_midi_guide.sh song.mid 1 --min-rest 0.05
+```
+
+**Advantages of MIDI input:**
+- Exact pitch values (no detection errors)
+- Perfect timing information
+- Works with any melody you can create or export as MIDI
+
 ### Tips for Best Results
 
 1. **Use hybrid mode** for most vocals - best accuracy with gap filling
@@ -315,6 +392,195 @@ open data/segments/guide_midi_preview.mp4
 3. **Adjust silence threshold** if too many/few gaps detected
 4. **Use pitch smoothing (5-7)** for vibrato-heavy vocals
 5. **Increase threshold** if you get too many micro-segments
+
+### Source Video Database
+
+After analyzing the guide video, build a searchable pitch database from source singing footage:
+
+```bash
+./test_pitch_source.sh data/input/source_video.mp4
+```
+
+**Combine multiple source videos:**
+```bash
+# Build database from first video
+./test_pitch_source.sh video1.mp4
+
+# Add more videos to the same database
+./test_pitch_source.sh video2.mp4 --append
+./test_pitch_source.sh video3.mp4 --append
+
+# Now source_database.json contains clips from all three videos!
+```
+
+**All the same parameters work:**
+```bash
+./test_pitch_source.sh source.mp4 \
+  --pitch-method hybrid \
+  --pitch-smoothing 5 \
+  --threshold 50 \
+  --silence-threshold -50
+```
+
+**What it does:**
+1. Extracts audio from source video
+2. Detects all pitch segments using continuous tracking
+3. Builds MIDI note index for fast lookup
+4. Tracks silence gaps between segments
+5. Calculates RMS volume for each segment
+6. Saves comprehensive JSON database
+
+**Database contains:**
+- **pitch\_database**: Array of pitch segments with timing, Hz, MIDI note, confidence, volume, video frame numbers
+- **silence\_segments**: Gaps between pitch segments (>50ms)
+- **pitch\_index**: Fast lookup mapping MIDI note → segment IDs
+- **Metadata**: Total segments, unique pitches, duration statistics
+
+**Example database entry:**
+```json
+{
+  "segment_id": 42,
+  "start_time": 3.25,
+  "end_time": 3.68,
+  "duration": 0.43,
+  "pitch_hz": 440.0,
+  "pitch_midi": 69,
+  "pitch_note": "A4",
+  "pitch_confidence": 0.95,
+  "rms_db": -18.5,
+  "video_start_frame": 78,
+  "video_end_frame": 88,
+  "video_path": "/path/to/source_video.mp4"
+}
+```
+
+**Usage tips:**
+- **Combine multiple videos** for more variety and better pitch coverage
+- Use same parameters as guide video for consistency
+- Check statistics: ensure coverage of needed pitch range
+- Each segment tracks which source video it came from
+
+### Pitch Matching
+
+Match the guide video's pitch sequence to your source database to create assembly instructions:
+
+```bash
+./test_pitch_matcher.sh \
+  data/segments/guide_sequence.json \
+  data/segments/source_database.json
+```
+
+**Matching Strategy:**
+1. **Exact pitch match** (preferred) - finds source clips with same MIDI note
+2. **Transposed match** - transposes source clips if no exact match available
+3. **Missing pitches** - tracks pitches not found in source (to inform future videos)
+4. **Duration handling** - trims, loops, or combines clips to match guide timing
+5. **Smart scoring** - 60% duration match + 40% pitch confidence
+
+**Reuse Policies:**
+
+Control how source clips can be reused:
+
+```bash
+# Minimum gap between reuses (default, natural variety)
+./test_pitch_matcher.sh guide.json source.json --reuse-policy min_gap
+
+# No reuse (maximum variety, needs large source database)
+./test_pitch_matcher.sh guide.json source.json --reuse-policy none
+
+# Unlimited reuse (best matches, may be repetitive)
+./test_pitch_matcher.sh guide.json source.json --reuse-policy allow
+
+# Limited reuses (each clip max 3 times)
+./test_pitch_matcher.sh guide.json source.json --reuse-policy limited --max-reuses 3
+
+# Percentage limit (max 30% reuses)
+./test_pitch_matcher.sh guide.json source.json --reuse-policy percentage --reuse-percentage 0.3
+```
+
+**Advanced Options:**
+
+```bash
+# Exact matches only, no transposition
+./test_pitch_matcher.sh guide.json source.json --no-transposition
+
+# Adjust scoring weights (favor duration or confidence)
+./test_pitch_matcher.sh guide.json source.json \
+  --duration-weight 0.7 \
+  --confidence-weight 0.3
+
+# Disable combining clips (only loop single clips)
+./test_pitch_matcher.sh guide.json source.json --no-combine-clips
+
+# Limit transposition range
+./test_pitch_matcher.sh guide.json source.json --max-transpose 3
+```
+
+**Output (match\_plan.json):**
+- Array of matches linking each guide segment to source clips
+- Transposition amounts (if needed)
+- Duration handling instructions (trim/loop/combine)
+- Statistics: exact vs transposed matches, reuse counts
+- Missing pitches list for expanding source database
+
+**Match quality indicators:**
+- `exact`: Perfect pitch match from source database
+- `transposed`: Source clip transposed to target pitch
+- `missing`: No suitable clip found (needs more source videos)
+
+### Video Assembly
+
+Assemble the final video from the match plan:
+
+```bash
+./test_pitch_video_assembly.sh data/segments/match_plan.json
+```
+
+**What it does:**
+1. **Extracts video clips** from source videos based on frame numbers
+2. **Extracts and transposes audio** using librosa pitch shifting
+3. **Handles duration**:
+  - Trims longer clips to match guide timing
+  - Loops shorter clips to fill guide duration
+  - Combines multiple clips when specified
+4. **Concatenates clips** into final seamless video
+5. **Outputs high-quality video** (H.264 CRF 18, AAC 320kbps)
+
+**Options:**
+
+```bash
+# Custom output location
+./test_pitch_video_assembly.sh match_plan.json --output videos/my_video.mp4
+
+# Keep temporary files for debugging
+./test_pitch_video_assembly.sh match_plan.json --no-cleanup
+
+# Custom temporary directory
+./test_pitch_video_assembly.sh match_plan.json --temp-dir /tmp/video_temp
+```
+
+**Output quality:**
+- Video: H.264, CRF 18 (visually lossless), slow preset
+- Audio: AAC 320kbps (high quality)
+- Resolution: Matches source videos
+
+**Process flow:**
+```
+For each match in match_plan:
+  1. Extract video clip (start_frame → end_frame)
+  2. Extract audio clip
+  3. Transpose audio by N semitones (if needed)
+  4. Combine video + transposed audio
+  5. Trim/loop/combine as needed
+
+Concatenate all clips → Final video
+```
+
+**Tips:**
+- First run may take time (extracting and processing many clips)
+- Use `--no-cleanup` to inspect individual clips if issues occur
+- Check match plan statistics before assembly (missing matches will be skipped)
+- Higher quality source videos = higher quality output
 
 ## Interactive Tools
 
@@ -362,6 +628,10 @@ video-hacking/
 │   ├── imagebind_video_embedder.py      # Extract video embeddings
 │   ├── semantic_matcher.py              # Match audio to video
 │   ├── video_assembler.py               # Assemble final videos
+│   ├── pitch_guide_analyzer.py          # Analyze guide video pitch
+│   ├── pitch_source_analyzer.py         # Build source pitch database
+│   ├── pitch_matcher.py                 # Match guide to source
+│   ├── pitch_video_assembler.py         # Assemble pitch-matched video
 │   └── interactive_strength_visualizer.py  # HTML visualizer
 ├── data/
 │   ├── input/                           # Source files
@@ -372,12 +642,18 @@ video-hacking/
 ├── test_semantic_matching.sh            # Phase 4 testing
 ├── test_video_assembly.sh               # Phase 5 testing
 ├── test_onset_strength.sh               # Audio analysis testing
+├── test_pitch_guide.sh                  # Analyze guide video pitch
+├── test_pitch_source.sh                 # Build source pitch database
+├── test_pitch_matcher.sh                # Match guide to source
+├── test_pitch_video_assembly.sh         # Assemble pitch-matched video
 ├── install_imagebind.sh                 # ImageBind installer
 ├── fix_numpy.sh                         # NumPy version fixer
 └── requirements.txt
 ```
 
-## Complete Workflow Example
+## Complete Workflow Examples
+
+### Audio-Driven Video Art
 
 ```bash
 # Step 1: Activate environment
@@ -404,6 +680,43 @@ open data/output/onset_strength_visualizer.html
 # Step 6: View results
 open data/output/final_video_original_audio.mp4  # Original audio
 open data/output/final_video.mp4                 # Guidance audio
+```
+
+### Pitch-Matching Video Recutting
+
+```bash
+# Step 1: Activate environment
+conda activate vh
+
+# Step 2: Analyze guide video (the target pitch sequence)
+./test_pitch_guide.sh data/input/guide_video.mp4 \
+  --pitch-method hybrid \
+  --pitch-smoothing 5 \
+  --silence-threshold -60
+
+# Step 3: Review MIDI preview to verify pitch detection
+open data/segments/guide_midi_preview.mp4
+
+# Step 4: Build source database from singing footage
+# Add multiple videos for more variety
+./test_pitch_source.sh data/input/source1.mp4 \
+  --pitch-method hybrid \
+  --pitch-smoothing 5
+
+./test_pitch_source.sh data/input/source2.mp4 --append
+./test_pitch_source.sh data/input/source3.mp4 --append
+
+# Step 5: Match guide to source database
+./test_pitch_matcher.sh \
+  data/segments/guide_sequence.json \
+  data/segments/source_database.json \
+  --reuse-policy min_gap
+
+# Step 6: Assemble final video
+./test_pitch_video_assembly.sh data/segments/match_plan.json
+
+# Step 7: View result
+open data/output/pitch_matched_video.mp4
 ```
 
 ## Output Files
@@ -553,15 +866,23 @@ All scripts auto-detect GPU with `--device auto`
 - [ ] Additional reuse strategies
 - [ ] Color grading integration
 
-### Pitch-Matching Video Recutting
+### Pitch-Matching Video Recutting (Complete)
 - [x] Multiple pitch detection methods (CREPE, SwiftF0, Basic Pitch)
 - [x] Hybrid mixture-of-experts (CREPE + SwiftF0)
 - [x] Pitch smoothing and silence detection
 - [x] MIDI preview video generation
 - [x] Configurable parameters (threshold, smoothing, silence)
-- [ ] Source video pitch analysis
-- [ ] Pitch matching between guide and source
-- [ ] Final video assembly based on pitch matches
+- [x] Source video pitch analysis with searchable database
+- [x] Volume tracking (RMS amplitude) per pitch segment
+- [x] Silence gap detection and tracking
+- [x] Pitch matching between guide and source
+- [x] Smart scoring (duration + confidence weighting)
+- [x] Pitch transposition for missing notes
+- [x] Duration handling (trim, loop, combine clips)
+- [x] Reuse policies (none, allow, min_gap, limited, percentage)
+- [x] Final video assembly based on pitch matches
+- [x] Audio pitch shifting with librosa
+- [x] Clip extraction, trimming, looping, and concatenation
 
 ## License
 

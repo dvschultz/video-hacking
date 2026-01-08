@@ -20,3 +20,4 @@ tensorflow>=2.8.0,<2.16.0  # Required by CREPE (avoid 2.16+ for compatibility)
 basic-pitch  # Spotify's multipitch detection (alternative to CREPE)
 swift-f0  # Fast CPU-based pitch detection (alternative to CREPE)
 sounddevice  # Optional: for MIDI player audio playback
+mido  # MIDI file parsing for midi_guide_converter
