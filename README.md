@@ -24,6 +24,13 @@ This project uses **ImageBind multimodal embeddings** to semantically match vide
 - **MIDI preview videos**: Visual verification of pitch detection accuracy
 - **Configurable parameters**: Silence threshold, pitch change sensitivity, segment duration filters
 
+### Duration-Based Video Matching
+- **Folder-based source clips**: Match guide segments to a folder of video clips
+- **Duration matching**: Automatically selects shortest clip >= target duration
+- **Three crop modes**: Crop from start, middle (centered), or end of clips
+- **Same reuse policies**: Control clip repetition (none, allow, min_gap, limited, percentage)
+- **Video metadata tracking**: Stores resolution, fps, codec for each clip
+
 ## Installation
 
 ### Requirements
@@ -582,6 +589,97 @@ Concatenate all clips → Final video
 - Check match plan statistics before assembly (missing matches will be skipped)
 - Higher quality source videos = higher quality output
 
+## Duration-Based Video Matching
+
+Match guide segments to a folder of pre-existing video clips based on duration. Unlike pitch matching (which analyzes singing), this workflow uses individual video clip files and matches them by length.
+
+### Quick Start
+
+**Step 1: Build duration database** from a folder of video clips:
+```bash
+./test_duration_source.sh /path/to/video/clips
+
+# Options:
+#   --extensions mp4,mov    Video file extensions to include
+#   --recursive             Search subdirectories
+#   --append                Add to existing database
+#   --min-duration 0.5      Skip clips shorter than N seconds
+```
+
+**Step 2: Create guide sequence** (use existing MIDI or pitch guide tools):
+```bash
+# From MIDI file:
+./test_midi_guide.sh melody.mid 1
+
+# OR from video:
+./test_pitch_guide.sh guide_video.mp4
+```
+
+**Step 3: Match guide to clips by duration:**
+```bash
+./test_duration_matcher.sh \
+  data/segments/guide_sequence.json \
+  data/segments/duration_database.json \
+  --crop-mode middle \
+  --reuse-policy min_gap
+```
+
+**Step 4: Assemble final video:**
+```bash
+./test_duration_assembly.sh data/segments/duration_match_plan.json \
+  --auto-resolution --auto-fps
+```
+
+### Crop Modes
+
+Control how clips are trimmed to match guide segment durations:
+
+- **start**: Use the first N seconds of each clip
+- **middle**: Trim equally from start and end (centered crop)
+- **end**: Use the last N seconds of each clip
+
+```bash
+# Examples:
+./test_duration_matcher.sh guide.json source.json --crop-mode start
+./test_duration_matcher.sh guide.json source.json --crop-mode middle  # default
+./test_duration_matcher.sh guide.json source.json --crop-mode end
+```
+
+### Reuse Policies
+
+Same policies as pitch matching:
+
+```bash
+# No reuse (each clip used once)
+./test_duration_matcher.sh guide.json source.json --reuse-policy none
+
+# Unlimited reuse
+./test_duration_matcher.sh guide.json source.json --reuse-policy allow
+
+# Minimum gap between reuses (default)
+./test_duration_matcher.sh guide.json source.json --reuse-policy min_gap --min-reuse-gap 5
+
+# Limited reuses per clip
+./test_duration_matcher.sh guide.json source.json --reuse-policy limited --max-reuses 3
+
+# Percentage limit
+./test_duration_matcher.sh guide.json source.json --reuse-policy percentage --reuse-percentage 0.3
+```
+
+### How It Works
+
+1. **Scan folder**: Extracts duration and metadata (resolution, fps, codec) from each clip
+2. **Build sorted index**: Clips indexed by duration for efficient lookup
+3. **Match by duration**: For each guide segment, finds shortest clip >= target duration
+4. **Calculate crop frames**: Determines start/end frames based on crop mode
+5. **Assemble video**: Extracts cropped clips and concatenates with normalization
+
+### Output Files
+
+- `data/segments/duration_database.json` - Clip metadata with durations
+- `data/segments/duration_match_plan.json` - Matching instructions with crop frames
+- `data/output/duration_matched_video.mp4` - Final assembled video
+
 ## Interactive Tools
 
 ### Onset Strength Visualizer
@@ -632,6 +730,9 @@ video-hacking/
 │   ├── pitch_source_analyzer.py         # Build source pitch database
 │   ├── pitch_matcher.py                 # Match guide to source
 │   ├── pitch_video_assembler.py         # Assemble pitch-matched video
+│   ├── duration_source_analyzer.py      # Build duration database from clips
+│   ├── duration_matcher.py              # Match guide to clips by duration
+│   ├── duration_video_assembler.py      # Assemble duration-matched video
 │   └── interactive_strength_visualizer.py  # HTML visualizer
 ├── data/
 │   ├── input/                           # Source files
@@ -646,6 +747,9 @@ video-hacking/
 ├── test_pitch_source.sh                 # Build source pitch database
 ├── test_pitch_matcher.sh                # Match guide to source
 ├── test_pitch_video_assembly.sh         # Assemble pitch-matched video
+├── test_duration_source.sh              # Build duration database from clips
+├── test_duration_matcher.sh             # Match guide to clips by duration
+├── test_duration_assembly.sh            # Assemble duration-matched video
 ├── install_imagebind.sh                 # ImageBind installer
 ├── fix_numpy.sh                         # NumPy version fixer
 └── requirements.txt
@@ -883,6 +987,14 @@ All scripts auto-detect GPU with `--device auto`
 - [x] Final video assembly based on pitch matches
 - [x] Audio pitch shifting with librosa
 - [x] Clip extraction, trimming, looping, and concatenation
+
+### Duration-Based Video Matching (Complete)
+- [x] Folder scanning with video metadata extraction
+- [x] Duration-sorted index for efficient matching
+- [x] Three crop modes (start, middle, end)
+- [x] Same reuse policies as other matchers
+- [x] Parallel clip normalization and concatenation
+- [x] Auto-detection of resolution and frame rate
 
 ## License
 
