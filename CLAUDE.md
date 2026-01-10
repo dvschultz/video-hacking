@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Audio-driven video art toolkit that uses **ImageBind multimodal embeddings** for semantic audio-visual matching and **pitch detection** for musical video recutting. Two main workflows:
+Audio-driven video art toolkit that uses **ImageBind multimodal embeddings** for semantic audio-visual matching and **pitch detection** for musical video recutting. Three main workflows:
 
 1. **Semantic Matching**: Cuts video based on audio onset strength, matches clips semantically using ImageBind
 2. **Pitch Matching**: Recuts singing footage by matching pitch sequences between guide and source videos
+3. **Duration Matching**: Matches guide segments to a folder of video clips based on duration
 
 ## Common Commands
 
@@ -48,6 +49,24 @@ pip install -r requirements.txt      # Install dependencies
 
 # Step 4: Assemble final video
 ./test_pitch_video_assembly.sh data/segments/match_plan.json
+```
+
+### Duration Matching Pipeline
+```bash
+# Step 1: Build duration database from folder of video clips
+./test_duration_source.sh <clips_folder> [--extensions mp4,mov] [--append]
+
+# Step 2: Create guide sequence (use existing MIDI or pitch guide tools)
+./test_midi_guide.sh <melody.mid> <channel>
+# OR
+./test_pitch_guide.sh <guide_video.mp4>
+
+# Step 3: Match guide to clips by duration
+# --crop-mode: start, middle, end (default: middle)
+./test_duration_matcher.sh data/segments/guide_sequence.json data/segments/duration_database.json [--crop-mode middle]
+
+# Step 4: Assemble final video
+./test_duration_assembly.sh data/segments/duration_match_plan.json [--auto-resolution] [--auto-fps]
 ```
 
 ### Running Individual Components
@@ -91,10 +110,16 @@ python src/semantic_matcher.py --audio-embeddings <audio.json> --video-embedding
 - Extract 1024-dim ImageBind embeddings for audio segments and video windows
 - Video uses sliding window with configurable stride and chunk-size for memory management
 
-**Matching** (`src/semantic_matcher.py`, `src/pitch_matcher.py`):
+**Matching** (`src/semantic_matcher.py`, `src/pitch_matcher.py`, `src/duration_matcher.py`):
 - Semantic: cosine similarity between audio/video embeddings
 - Pitch: exact MIDI match, nearest pitch fallback, duration-weighted scoring
+- Duration: matches guide segments to clips by finding shortest clip >= target duration
 - Reuse policies control clip repetition: `none`, `allow`, `min_gap`, `limited`, `percentage`
+
+**Duration Matching** (`src/duration_source_analyzer.py`, `src/duration_matcher.py`, `src/duration_video_assembler.py`):
+- Scans folder of video clips, catalogs duration and video metadata
+- Matches guide segments to nearest longer clip, crops to exact length
+- Three crop modes: `start` (use first N seconds), `middle` (centered), `end` (use last N seconds)
 
 **Assembly** (`src/video_assembler.py`, `src/pitch_video_assembler.py`):
 - FFmpeg-based concatenation with H.264 (CRF 18) and ProRes 422 outputs
@@ -116,6 +141,14 @@ Source video → Pitch detection → Pitch database (searchable by MIDI note)
 Pitch matching → Match plan → Video assembly with transposition
 ```
 
+For duration matching:
+```
+Folder of clips → Duration analyzer → Duration database (sorted by duration)
+Guide sequence → Duration matcher → Match plan with crop instructions
+                                         ↓
+                              Video assembly with cropping
+```
+
 ### Key Data Files
 
 - `data/segments/audio_segments.json` - Audio segment metadata
@@ -125,6 +158,8 @@ Pitch matching → Match plan → Video assembly with transposition
 - `data/segments/guide_sequence.json` - Guide video pitch sequence
 - `data/segments/source_database.json` - Source pitch database with MIDI index
 - `data/segments/match_plan.json` - Pitch matching instructions
+- `data/segments/duration_database.json` - Duration database with clip metadata
+- `data/segments/duration_match_plan.json` - Duration matching instructions with crop frames
 
 ## Dependencies
 
