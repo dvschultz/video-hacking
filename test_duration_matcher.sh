@@ -24,6 +24,7 @@ if [ $# -lt 2 ]; then
     echo "  --max-reuses N          Maximum reuses per clip (default: 3)"
     echo "  --reuse-percentage N    Max reuse percentage (default: 0.3)"
     echo "  --no-prefer-closest     Use shortest valid clip instead of closest duration"
+    echo "  --match-rests           Match rest segments with video clips instead of black frames"
     echo ""
     echo "Crop Modes:"
     echo "  start   - Use first N seconds of clip"
@@ -42,6 +43,7 @@ if [ $# -lt 2 ]; then
     echo "  $0 guide.json source.json --crop-mode start"
     echo "  $0 guide.json source.json --reuse-policy allow"
     echo "  $0 guide.json source.json --crop-mode end --reuse-policy none"
+    echo "  $0 guide.json source.json --match-rests"
     exit 1
 fi
 
@@ -114,13 +116,17 @@ echo ""
 if [ -f "$OUTPUT_JSON" ]; then
     echo "Match statistics:"
     MATCHED=$(grep -o '"matched_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
+    MATCHED_RESTS=$(grep -o '"matched_rest_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
     UNMATCHED=$(grep -o '"unmatched_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    REST=$(grep -o '"rest_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
+    REST=$(grep -o '"rest_segments_black_frames": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
     UNIQUE=$(grep -o '"unique_clips_used": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
 
     echo "  - Matched: $MATCHED"
+    if [ -n "$MATCHED_RESTS" ] && [ "$MATCHED_RESTS" -gt 0 ]; then
+        echo "  - Rests matched with clips: $MATCHED_RESTS"
+    fi
     echo "  - Unmatched: $UNMATCHED"
-    echo "  - Rest segments: $REST"
+    echo "  - Rest segments (black frames): $REST"
     echo "  - Unique clips used: $UNIQUE"
 fi
 

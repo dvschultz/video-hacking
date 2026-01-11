@@ -667,6 +667,15 @@ Same policies as pitch matching:
 ./test_duration_matcher.sh guide.json source.json --reuse-policy percentage --reuse-percentage 0.3
 ```
 
+### Rest Segment Handling
+
+By default, rest segments (silence/gaps in the guide) become black frames. Use `--match-rests` to match them with video clips instead:
+
+```bash
+# Match rest segments with video clips (instead of black frames)
+./test_duration_matcher.sh guide.json source.json --match-rests
+```
+
 ### How It Works
 
 1. **Scan folder**: Extracts duration and metadata (resolution, fps, codec) from each clip

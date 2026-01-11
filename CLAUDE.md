@@ -63,7 +63,8 @@ pip install -r requirements.txt      # Install dependencies
 
 # Step 3: Match guide to clips by duration
 # --crop-mode: start, middle, end (default: middle)
-./test_duration_matcher.sh data/segments/guide_sequence.json data/segments/duration_database.json [--crop-mode middle]
+# --match-rests: match rest segments with clips instead of black frames
+./test_duration_matcher.sh data/segments/guide_sequence.json data/segments/duration_database.json [--crop-mode middle] [--match-rests]
 
 # Step 4: Assemble final video
 ./test_duration_assembly.sh data/segments/duration_match_plan.json [--auto-resolution] [--auto-fps]

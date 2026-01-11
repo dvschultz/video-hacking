@@ -35,7 +35,8 @@ class DurationMatcher:
                  max_reuses: int = 3,
                  reuse_percentage: float = 0.3,
                  crop_mode: str = 'middle',
-                 prefer_closest_duration: bool = True):
+                 prefer_closest_duration: bool = True,
+                 match_rests: bool = False):
         """
         Initialize the duration matcher.
 
@@ -48,6 +49,7 @@ class DurationMatcher:
             reuse_percentage: Maximum percentage of segments that can be reuses (for 'percentage' policy)
             crop_mode: How to crop clips ('start', 'middle', 'end')
             prefer_closest_duration: Prefer clips closest to target duration (vs just shortest valid)
+            match_rests: Match rest segments with video clips (vs black frames)
         """
         self.guide_path = Path(guide_path)
         self.duration_db_path = Path(duration_db_path)
@@ -61,6 +63,7 @@ class DurationMatcher:
         # Crop settings
         self.crop_mode = crop_mode
         self.prefer_closest_duration = prefer_closest_duration
+        self.match_rests = match_rests
 
         # Data
         self.guide_sequence = None
@@ -252,6 +255,7 @@ class DurationMatcher:
         print(f"\nMatching guide to source clips...")
         print(f"  Reuse policy: {self.reuse_policy}")
         print(f"  Crop mode: {self.crop_mode}")
+        print(f"  Match rests: {self.match_rests}")
 
         self.matches = []
         self.unmatched_segments = []
@@ -268,7 +272,7 @@ class DurationMatcher:
                 'is_rest': is_rest,
             }
 
-            if is_rest:
+            if is_rest and not self.match_rests:
                 # Rest segment - will be handled as black frames
                 match['match_type'] = 'rest'
                 match['source_clips'] = []
@@ -310,14 +314,17 @@ class DurationMatcher:
             self.matches.append(match)
 
         # Print summary
-        matched = sum(1 for m in self.matches if m['match_type'] == 'duration')
+        matched = sum(1 for m in self.matches if m['match_type'] == 'duration' and not m.get('is_rest', False))
+        matched_rests = sum(1 for m in self.matches if m['match_type'] == 'duration' and m.get('is_rest', False))
         unmatched = sum(1 for m in self.matches if m['match_type'] == 'unmatched')
-        rest = sum(1 for m in self.matches if m['match_type'] == 'rest')
+        rest_black = sum(1 for m in self.matches if m['match_type'] == 'rest')
 
         print(f"\nMatching complete:")
         print(f"  Duration matches: {matched}")
+        if matched_rests > 0:
+            print(f"  Rests matched with clips: {matched_rests}")
         print(f"  Unmatched: {unmatched}")
-        print(f"  Rest segments: {rest}")
+        print(f"  Rest segments (black frames): {rest_black}")
 
         if unmatched > 0:
             print(f"\nWarning: {unmatched} segments could not be matched")
@@ -330,7 +337,8 @@ class DurationMatcher:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Calculate statistics
-        matched = sum(1 for m in self.matches if m['match_type'] == 'duration')
+        matched = sum(1 for m in self.matches if m['match_type'] == 'duration' and not m.get('is_rest', False))
+        matched_rests = sum(1 for m in self.matches if m['match_type'] == 'duration' and m.get('is_rest', False))
         unmatched = sum(1 for m in self.matches if m['match_type'] == 'unmatched')
         rest = sum(1 for m in self.matches if m['match_type'] == 'rest')
 
@@ -349,13 +357,15 @@ class DurationMatcher:
                 'max_reuses': self.max_reuses,
                 'reuse_percentage': self.reuse_percentage,
                 'crop_mode': self.crop_mode,
-                'prefer_closest_duration': self.prefer_closest_duration
+                'prefer_closest_duration': self.prefer_closest_duration,
+                'match_rests': self.match_rests
             },
             'statistics': {
                 'total_guide_segments': len(self.matches),
                 'matched_segments': matched,
+                'matched_rest_segments': matched_rests,
                 'unmatched_segments': unmatched,
-                'rest_segments': rest,
+                'rest_segments_black_frames': rest,
                 'unique_clips_used': unique_clips,
                 'clips_reused': reused_clips,
                 'max_reuse_count': max_reuse,
@@ -413,6 +423,8 @@ Examples:
                         help='Maximum reuse percentage (default: 0.3)')
     parser.add_argument('--no-prefer-closest', action='store_true',
                         help='Use shortest valid clip instead of closest duration')
+    parser.add_argument('--match-rests', action='store_true',
+                        help='Match rest segments with video clips instead of black frames')
 
     args = parser.parse_args()
 
@@ -433,7 +445,8 @@ Examples:
         max_reuses=args.max_reuses,
         reuse_percentage=args.reuse_percentage,
         crop_mode=args.crop_mode,
-        prefer_closest_duration=not args.no_prefer_closest
+        prefer_closest_duration=not args.no_prefer_closest,
+        match_rests=args.match_rests
     )
 
     matcher.load_guide_sequence()
