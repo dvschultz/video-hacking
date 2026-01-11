@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
+from edl_generator import EDLGenerator
+
 
 class PitchVideoAssembler:
     """Assembles video from pitch match plan."""
@@ -360,9 +362,9 @@ class PitchVideoAssembler:
                 return min_fps
 
     def extract_video_clip(self, video_path: str, start_frame: int, end_frame: int,
-                          fps: int, output_path: str):
+                          fps: float, output_path: str):
         """
-        Extract video clip using ffmpeg.
+        Extract video clip using ffmpeg with accurate seeking.
 
         Args:
             video_path: Source video path
@@ -375,11 +377,12 @@ class PitchVideoAssembler:
         start_time = start_frame / fps
         duration = (end_frame - start_frame) / fps
 
-        # Use ffmpeg to extract clip
+        # Use ffmpeg with -ss AFTER -i for frame-accurate seeking
+        # This is slower but maintains sync between video and audio
         cmd = [
             'ffmpeg', '-y',
-            '-ss', str(start_time),
             '-i', str(video_path),
+            '-ss', str(start_time),
             '-t', str(duration),
             '-c:v', 'libx264',
             '-preset', 'fast',
@@ -389,14 +392,14 @@ class PitchVideoAssembler:
         ]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             print(f"Error extracting video clip: {e}")
             print(f"stderr: {e.stderr.decode()}")
             raise
 
     def extract_clip_with_audio(self, video_path: str, start_frame: int, end_frame: int,
-                               fps: int, output_path: str):
+                               fps: float, output_path: str):
         """
         Extract video clip with original audio (for silence segments).
 
@@ -413,21 +416,23 @@ class PitchVideoAssembler:
         if duration <= 0:
             duration = 0.1  # Minimum duration
 
+        # Use -ss AFTER -i for frame-accurate seeking to maintain A/V sync
         cmd = [
             'ffmpeg', '-y',
-            '-ss', str(start_time),
             '-i', str(video_path),
-            '-t', str(duration),
+            '-ss', f'{start_time:.6f}',
+            '-t', f'{duration:.6f}',
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-crf', '18',
             '-c:a', 'aac',
+            '-ar', '44100',  # Use consistent sample rate
             '-b:a', '320k',
             str(output_path)
         ]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             print(f"Error extracting clip with audio: {e}")
             print(f"stderr: {e.stderr.decode()}")
@@ -445,7 +450,7 @@ class PitchVideoAssembler:
             height: Video height (default 1080)
             fps: Frame rate (default 24)
         """
-        # Generate black video with silent audio
+        # Generate black video with silent audio at consistent sample rate
         cmd = [
             'ffmpeg', '-y',
             '-f', 'lavfi',
@@ -456,21 +461,22 @@ class PitchVideoAssembler:
             '-preset', 'fast',
             '-crf', '18',
             '-c:a', 'aac',
+            '-ar', '44100',
             '-b:a', '320k',
-            '-shortest',
+            '-t', str(duration),  # Explicit duration instead of -shortest
             str(output_path)
         ]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             print(f"Error generating rest clip: {e}")
             print(f"stderr: {e.stderr.decode()}")
             raise
 
     def extract_and_transpose_audio(self, video_path: str, start_frame: int, end_frame: int,
-                                    fps: int, transpose_semitones: int,
-                                    output_path: str, sample_rate: int = 22050):
+                                    fps: float, transpose_semitones: int,
+                                    output_path: str, sample_rate: int = 44100):
         """
         Extract audio clip and transpose pitch if needed.
 
@@ -481,19 +487,23 @@ class PitchVideoAssembler:
             fps: Video frame rate
             transpose_semitones: Semitones to transpose (0 = no transpose)
             output_path: Output audio path
-            sample_rate: Audio sample rate
+            sample_rate: Audio sample rate (default 44100 for consistency)
         """
-        # Convert frames to time
+        # Convert frames to time - use actual fps for precision
         start_time = start_frame / fps
         duration = (end_frame - start_frame) / fps
+
+        # Calculate exact number of audio samples needed to match video duration
+        target_samples = int(round(duration * sample_rate))
 
         # Extract audio to temporary file
         temp_audio = self.temp_dir / f"temp_audio_{Path(output_path).stem}.wav"
 
+        # Use -ss AFTER -i for frame-accurate seeking (matches video extraction)
         cmd = [
             'ffmpeg', '-y',
-            '-ss', str(start_time),
             '-i', str(video_path),
+            '-ss', str(start_time),
             '-t', str(duration),
             '-vn',  # No video
             '-acodec', 'pcm_s16le',
@@ -503,7 +513,7 @@ class PitchVideoAssembler:
         ]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             print(f"Error extracting audio: {e}")
             print(f"stderr: {e.stderr.decode()}")
@@ -517,7 +527,15 @@ class PitchVideoAssembler:
             print(f"    Transposing by {transpose_semitones:+d} semitones")
             audio = librosa.effects.pitch_shift(audio, sr=sr, n_steps=transpose_semitones)
 
-        # Save transposed audio
+        # Trim or pad audio to exact target duration (to match video frames precisely)
+        if len(audio) > target_samples:
+            audio = audio[:target_samples]
+        elif len(audio) < target_samples:
+            # Pad with silence if audio is shorter than expected
+            padding = np.zeros(target_samples - len(audio))
+            audio = np.concatenate([audio, padding])
+
+        # Save audio with exact duration
         sf.write(str(output_path), audio, sr)
 
         # Clean up temp file
@@ -532,19 +550,21 @@ class PitchVideoAssembler:
             audio_path: Audio file path
             output_path: Output combined video path
         """
+        # Note: We don't use -shortest because audio is already precisely trimmed
+        # to match video duration in extract_and_transpose_audio()
         cmd = [
             'ffmpeg', '-y',
             '-i', str(video_path),
             '-i', str(audio_path),
             '-c:v', 'copy',
             '-c:a', 'aac',
+            '-ar', '44100',  # Ensure consistent sample rate
             '-b:a', '192k',
-            '-shortest',
             str(output_path)
         ]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             print(f"Error combining video and audio: {e}")
             print(f"stderr: {e.stderr.decode()}")
@@ -830,10 +850,12 @@ class PitchVideoAssembler:
         idx, clip_file, width, height, fps, temp_dir = args
         normalized_path = temp_dir / f"normalized_{idx:05d}.mp4"
 
+        # Only scale resolution here - don't change frame rate
+        # Frame rate conversion happens in final concatenation to preserve exact duration
         cmd = [
             'ffmpeg', '-y',
             '-i', str(clip_file),
-            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}',
+            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2',
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-crf', '18',
@@ -928,13 +950,25 @@ class PitchVideoAssembler:
             for clip_file in normalized_clips:
                 f.write(f"file '{Path(clip_file).absolute()}'\n")
 
-        # Concatenate using ffmpeg (now all clips have same format)
+        # Calculate expected total duration from match plan
+        expected_duration = sum(m['guide_duration'] for m in self.matches)
+        print(f"Expected output duration: {expected_duration:.4f}s")
+
+        # Concatenate with re-encode
+        # Use -r for exact frame rate and -t for exact duration
         cmd = [
             'ffmpeg', '-y',
             '-f', 'concat',
             '-safe', '0',
             '-i', str(concat_file),
-            '-c', 'copy',  # Can use copy since all normalized
+            '-r', str(target_fps),  # Force exact frame rate
+            '-t', f'{expected_duration:.6f}',  # Force exact duration
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '18',
+            '-c:a', 'aac',
+            '-ar', '44100',
+            '-b:a', '320k',
             str(output_path)
         ]
 
@@ -1011,6 +1045,82 @@ class PitchVideoAssembler:
 
         print("\n=== Video Assembly Complete ===")
 
+    def generate_edl(self, output_path: str, frame_rate: float = None) -> str:
+        """
+        Generate EDL file from match plan.
+
+        Args:
+            output_path: Path for output EDL file
+            frame_rate: Frame rate for timecode (uses target_fps if None)
+
+        Returns:
+            Path to generated EDL file
+        """
+        if frame_rate is None:
+            frame_rate = self.target_fps or 24.0
+
+        print(f"\n=== Generating EDL ===")
+        print(f"Frame rate: {frame_rate} fps")
+
+        # Determine title from output path
+        title = Path(output_path).stem
+
+        edl = EDLGenerator(title, frame_rate=frame_rate)
+
+        # Build a mapping of video paths to their fps for accurate source timecode
+        video_fps_map = {}
+
+        for match in self.matches:
+            match_type = match.get('match_type', 'unknown')
+            guide_duration = match.get('guide_duration', 0)
+
+            if match_type == 'rest' or match_type == 'missing':
+                # Black/rest segment
+                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                if match.get('guide_pitch_note'):
+                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                edl.add_black(guide_duration, comment=", ".join(comment_parts))
+            else:
+                # Video clip
+                source_clips = match.get('source_clips', [])
+                if source_clips:
+                    clip = source_clips[0]
+                    video_path = clip.get('video_path', '')
+
+                    # Get source video fps (cached)
+                    if video_path not in video_fps_map:
+                        video_fps_map[video_path] = self.get_video_fps(video_path)
+                    source_fps = video_fps_map[video_path]
+
+                    # Calculate source timecode from frames
+                    start_frame = clip.get('video_start_frame', 0)
+                    end_frame = clip.get('video_end_frame', start_frame)
+                    source_in = start_frame / source_fps
+                    source_out = end_frame / source_fps
+
+                    # Build comment
+                    comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                    if match.get('guide_pitch_note'):
+                        comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                    transpose = match.get('transpose_semitones', 0)
+                    if transpose != 0:
+                        comment_parts.append(f"Transpose: {transpose:+d} semitones")
+
+                    edl.add_event(
+                        source_path=video_path,
+                        source_in=source_in,
+                        source_out=source_out,
+                        comment=", ".join(comment_parts)
+                    )
+
+        # Write EDL
+        edl_path = edl.write(output_path)
+        print(f"EDL saved to: {edl_path}")
+        print(f"  Events: {edl.event_count}")
+        print(f"  Total duration: {edl.total_duration:.2f}s")
+
+        return edl_path
+
     def cleanup(self):
         """Clean up temporary files."""
         print("\nCleaning up temporary files...")
@@ -1086,6 +1196,22 @@ def main():
         action='store_true',
         help='Use black frames with muted audio for rest segments instead of source silence clips'
     )
+    parser.add_argument(
+        '--edl',
+        action='store_true',
+        help='Generate EDL file alongside video'
+    )
+    parser.add_argument(
+        '--edl-only',
+        action='store_true',
+        help='Generate EDL file only, skip video assembly'
+    )
+    parser.add_argument(
+        '--edl-output',
+        type=str,
+        default=None,
+        help='Custom EDL output path (default: same as video with .edl extension)'
+    )
 
     args = parser.parse_args()
 
@@ -1113,6 +1239,12 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Determine EDL output path
+    if args.edl_output:
+        edl_output_path = args.edl_output
+    else:
+        edl_output_path = str(output_path.with_suffix('.edl'))
+
     # Initialize assembler
     assembler = PitchVideoAssembler(
         match_plan_path=args.match_plan,
@@ -1128,11 +1260,23 @@ def main():
     # Load match plan
     assembler.load_match_plan()
 
+    # Handle EDL-only mode
+    if args.edl_only:
+        # For EDL-only, we need fps but don't need to process video
+        fps = target_fps or 24.0
+        assembler.generate_edl(edl_output_path, frame_rate=fps)
+        print("\n=== EDL Generation Complete ===")
+        return
+
     # Assemble video
     assembler.assemble_video(
         skip_resolution_prompt=args.auto_resolution,
         skip_fps_prompt=args.auto_fps
     )
+
+    # Generate EDL if requested
+    if args.edl:
+        assembler.generate_edl(edl_output_path)
 
     # Cleanup temporary files
     if not args.no_cleanup:

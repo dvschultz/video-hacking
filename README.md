@@ -31,6 +31,12 @@ This project uses **ImageBind multimodal embeddings** to semantically match vide
 - **Same reuse policies**: Control clip repetition (none, allow, min_gap, limited, percentage)
 - **Video metadata tracking**: Stores resolution, fps, codec for each clip
 
+### EDL Export
+- **CMX 3600 EDL format**: Industry-standard format for NLE import
+- **Works with all assemblers**: Duration, pitch, and semantic matching
+- **NLE compatibility**: DaVinci Resolve, Premiere Pro, Final Cut Pro, Avid
+- **EDL-only mode**: Fast generation without video processing
+
 ## Installation
 
 ### Requirements
@@ -689,6 +695,86 @@ By default, rest segments (silence/gaps in the guide) become black frames. Use `
 - `data/segments/duration_database.json` - Clip metadata with durations
 - `data/segments/duration_match_plan.json` - Matching instructions with crop frames
 - `data/output/duration_matched_video.mp4` - Final assembled video
+
+## EDL Export
+
+All video assemblers can generate CMX 3600 EDL (Edit Decision List) files for import into professional video editing software like DaVinci Resolve, Premiere Pro, Final Cut Pro, or Avid.
+
+### Usage
+
+Generate EDL alongside video assembly:
+```bash
+# Duration assembler
+./test_duration_assembly.sh data/segments/duration_match_plan.json --edl
+
+# Pitch assembler
+./test_pitch_video_assembly.sh data/segments/match_plan.json --edl
+
+# Semantic assembler
+./test_video_assembly.sh video.mp4 audio.wav --edl
+```
+
+Generate EDL only (skip video assembly):
+```bash
+# Fast EDL generation without video processing
+./test_duration_assembly.sh data/segments/duration_match_plan.json --edl-only --fps 24
+./test_pitch_video_assembly.sh data/segments/match_plan.json --edl-only --fps 24
+./test_video_assembly.sh video.mp4 audio.wav --edl-only --fps 24
+```
+
+Custom EDL output path:
+```bash
+./test_duration_assembly.sh data/segments/duration_match_plan.json --edl --edl-output my_edit.edl
+```
+
+### EDL Options
+
+| Option | Description |
+|--------|-------------|
+| `--edl` | Generate EDL file alongside video |
+| `--edl-only` | Generate EDL only, skip video assembly |
+| `--edl-output PATH` | Custom EDL output path (default: same as video with .edl extension) |
+| `--fps N` | Frame rate for EDL timecode (default: 24) |
+
+### Importing into NLEs
+
+**DaVinci Resolve:**
+1. File > Import > Timeline > Import AAF, EDL, XML...
+2. Select the .edl file
+3. When prompted, locate your source video clips
+
+**Premiere Pro:**
+1. File > Import
+2. Select the .edl file
+3. Link to source media when prompted
+
+**Final Cut Pro:**
+1. File > Import > XML/EDL
+2. Select the .edl file
+3. Reconnect media as needed
+
+### EDL Contents
+
+The generated EDL includes:
+- Event numbers and timecodes (SMPTE format)
+- Source file paths for each clip
+- Comments with segment information (guide ID, pitch notes, crop mode, etc.)
+- Black/rest segments marked as "BL" events
+
+Example EDL output:
+```
+TITLE: duration_matched_video
+FCM: NON-DROP FRAME
+
+001  001      V     C        00:00:00:00 00:00:05:00 00:00:00:00 00:00:05:00
+* FROM CLIP NAME: clip1.mp4
+* SOURCE FILE: /path/to/clip1.mp4
+* Guide segment 0, Crop: middle
+
+002  BL       V     C        00:00:00:00 00:00:02:00 00:00:05:00 00:00:07:00
+* BLACK/REST SEGMENT - 2.000 seconds
+* Guide segment 1 (REST)
+```
 
 ## Interactive Tools
 

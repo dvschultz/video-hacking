@@ -3,15 +3,24 @@
 # Usage: ./test_video_assembly.sh <source_video> <guidance_audio>
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: ./test_video_assembly.sh <source_video> <guidance_audio>"
+    echo "Usage: ./test_video_assembly.sh <source_video> <guidance_audio> [options]"
     echo ""
-    echo "Example:"
+    echo "Options:"
+    echo "  --fps N             Frame rate for EDL timecode (default: 24)"
+    echo "  --edl               Generate EDL file alongside video"
+    echo "  --edl-only          Generate EDL file only (skip video assembly)"
+    echo "  --edl-output PATH   Custom EDL output path"
+    echo ""
+    echo "Examples:"
     echo "  ./test_video_assembly.sh video.mp4 audio.wav"
+    echo "  ./test_video_assembly.sh video.mp4 audio.wav --edl"
+    echo "  ./test_video_assembly.sh video.mp4 audio.wav --edl-only --fps 24"
     exit 1
 fi
 
 SOURCE_VIDEO="$1"
 GUIDANCE_AUDIO="$2"
+shift 2  # Remove first two arguments, rest are options
 
 # Detect Python command
 if command -v python &> /dev/null && python -c "import sys; exit(0 if sys.version_info >= (3,8) else 1)" 2>/dev/null; then
@@ -45,7 +54,8 @@ $PYTHON_CMD src/video_assembler.py \
     --video "$SOURCE_VIDEO" \
     --audio "$GUIDANCE_AUDIO" \
     --matches data/segments/matches.json \
-    --output data/output/final_video.mp4
+    --output data/output/final_video.mp4 \
+    "$@"
 
 echo ""
 echo "============================================"

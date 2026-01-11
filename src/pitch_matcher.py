@@ -15,12 +15,16 @@ Matching Strategy:
 
 import argparse
 import json
+import random
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
 from pitch_utils import midi_to_note_name
+
+# Minimum clip duration (1 frame at 24fps = ~0.042s)
+MIN_CLIP_DURATION = 0.04
 
 
 class PitchMatcher:
@@ -178,30 +182,26 @@ class PitchMatcher:
         Returns:
             True if segment can be used
         """
+        usage_count = self.segment_usage[segment_id]
+
         if self.reuse_policy == 'allow':
             return True
-
-        if self.reuse_policy == 'none':
-            return self.segment_usage[segment_id] == 0
-
-        if self.reuse_policy == 'min_gap':
-            if self.segment_usage[segment_id] == 0:
+        elif self.reuse_policy == 'none':
+            return usage_count == 0
+        elif self.reuse_policy == 'min_gap':
+            if usage_count == 0:
                 return True
             last_pos = self.last_used_position.get(segment_id, -999)
             return (current_position - last_pos) >= self.min_reuse_gap
-
-        if self.reuse_policy == 'limited':
-            return self.segment_usage[segment_id] < self.max_reuses
-
-        if self.reuse_policy == 'percentage':
-            # Check if we're under the reuse percentage threshold
-            total_matches = len(self.matches)
-            reused_count = sum(1 for count in self.segment_usage.values() if count > 1)
-            if total_matches == 0:
+        elif self.reuse_policy == 'limited':
+            return usage_count < self.max_reuses
+        elif self.reuse_policy == 'percentage':
+            if not self.matches:
                 return True
-            return (reused_count / total_matches) < self.reuse_percentage
-
-        return True
+            reused_count = sum(1 for count in self.segment_usage.values() if count > 1)
+            return (reused_count / len(self.matches)) < self.reuse_percentage
+        else:
+            return True
 
     def find_exact_match(self, guide_seg: Dict, position: int) -> Optional[Dict]:
         """
@@ -244,6 +244,20 @@ class PitchMatcher:
 
         return best_candidate
 
+    def _get_transposition_order(self) -> List[int]:
+        """Get transposition offsets in order of preference."""
+        offsets = range(1, self.max_transposition_semitones + 1)
+
+        if self.prefer_small_transposition:
+            # Interleave positive and negative: ±1, ±2, ±3, etc.
+            result = []
+            for offset in offsets:
+                result.extend([offset, -offset])
+            return result
+
+        # All positive, then all negative
+        return list(offsets) + [-t for t in offsets]
+
     def find_transposed_match(self, guide_seg: Dict, position: int) -> Optional[Tuple[Dict, int]]:
         """
         Find pitch match via transposition.
@@ -259,33 +273,18 @@ class PitchMatcher:
             return None
 
         target_midi = guide_seg['pitch_midi']
-
-        # Try transpositions in order of preference (smaller first if preferred)
-        transposition_range = range(1, self.max_transposition_semitones + 1)
-
-        if self.prefer_small_transposition:
-            # Try ±1, ±2, ±3, etc.
-            transpositions_to_try = []
-            for offset in transposition_range:
-                transpositions_to_try.extend([offset, -offset])
-        else:
-            # Try all positive, then all negative
-            transpositions_to_try = list(transposition_range) + [-t for t in transposition_range]
+        target_duration = guide_seg['duration']
 
         best_match = None
         best_score = -1
         best_transpose = 0
 
-        target_duration = guide_seg['duration']
-
-        for transpose in transpositions_to_try:
+        for transpose in self._get_transposition_order():
             source_midi = target_midi + transpose
 
-            # Check if this transposed pitch exists
             if source_midi not in self.source_pitch_index:
                 continue
 
-            # Get available segments
             candidate_ids = self.source_pitch_index[source_midi]
             available_ids = [
                 seg_id for seg_id in candidate_ids
@@ -295,14 +294,12 @@ class PitchMatcher:
             if not available_ids:
                 continue
 
-            # Score candidates
+            # Penalize larger transpositions
+            transposition_penalty = abs(transpose) * 0.01
+
             for seg_id in available_ids:
                 seg = self.source_database[seg_id]
-                score = self.score_segment(seg, target_duration)
-
-                # Penalize larger transpositions slightly
-                transposition_penalty = abs(transpose) * 0.01
-                score = score * (1.0 - transposition_penalty)
+                score = self.score_segment(seg, target_duration) * (1.0 - transposition_penalty)
 
                 if score > best_score:
                     best_score = score
@@ -313,9 +310,31 @@ class PitchMatcher:
             return (best_match, best_transpose)
         return None
 
+    def _create_silence_clip(self, silence: Dict, use_duration: float, looped: bool = False) -> Dict:
+        """Create a silence clip dictionary with optional trimming."""
+        num_frames = silence['video_end_frame'] - silence['video_start_frame']
+        if silence['duration'] > 0:
+            end_frame = silence['video_start_frame'] + int(use_duration * num_frames / silence['duration'])
+        else:
+            end_frame = silence['video_end_frame']
+
+        clip = {
+            'video_path': silence['video_path'],
+            'video_start_frame': silence['video_start_frame'],
+            'video_end_frame': end_frame,
+            'duration': use_duration,
+            'start_time': silence['start_time'],
+            'end_time': silence['start_time'] + use_duration,
+            'is_silence': True
+        }
+        if looped:
+            clip['looped'] = True
+        return clip
+
     def find_silence_match(self, target_duration: float) -> Optional[List[Dict]]:
         """
         Find silence segments from source database to fill a rest.
+        Uses random selection, preferring clips >= target duration.
 
         Args:
             target_duration: Desired duration for the rest
@@ -326,53 +345,77 @@ class PitchMatcher:
         if not self.silence_segments:
             return None
 
-        # silence_segments already pre-sorted by duration (longest first) during load
         selected = []
         remaining_duration = target_duration
 
-        for silence in self.silence_segments:
-            if remaining_duration <= 0:
-                break
+        # Create a shuffled copy to randomize selection
+        available = self.silence_segments.copy()
+        random.shuffle(available)
 
-            # Use this silence segment
-            use_duration = min(silence['duration'], remaining_duration)
-            selected.append({
-                'video_path': silence['video_path'],
-                'video_start_frame': silence['video_start_frame'],
-                'video_end_frame': silence['video_start_frame'] + int(
-                    use_duration * (silence['video_end_frame'] - silence['video_start_frame']) / silence['duration']
-                ) if silence['duration'] > 0 else silence['video_end_frame'],
-                'duration': use_duration,
-                'start_time': silence['start_time'],
-                'end_time': silence['start_time'] + use_duration,
-                'is_silence': True
-            })
-            remaining_duration -= use_duration
+        while remaining_duration > 0.01 and available:
+            # Try to find clips >= remaining duration (can be trimmed to exact fit)
+            long_enough = [s for s in available if s['duration'] >= remaining_duration]
 
-            # If we've filled the duration, we're done
-            if remaining_duration <= 0.01:  # Small tolerance
-                break
+            if long_enough:
+                silence = random.choice(long_enough)
+                available.remove(silence)
+                selected.append(self._create_silence_clip(silence, remaining_duration))
+                remaining_duration = 0
+            else:
+                silence = available.pop(0)
+                selected.append(self._create_silence_clip(silence, silence['duration']))
+                remaining_duration -= silence['duration']
 
-        # If we couldn't fill the duration, loop the longest segment
+        # If we still need more duration, loop a random silence segment
         if remaining_duration > 0.01 and selected:
-            last_silence = self.silence_segments[0]  # Use longest (first in pre-sorted list)
+            loop_silence = random.choice(self.silence_segments)
             while remaining_duration > 0.01:
-                use_duration = min(last_silence['duration'], remaining_duration)
-                selected.append({
-                    'video_path': last_silence['video_path'],
-                    'video_start_frame': last_silence['video_start_frame'],
-                    'video_end_frame': last_silence['video_start_frame'] + int(
-                        use_duration * (last_silence['video_end_frame'] - last_silence['video_start_frame']) / last_silence['duration']
-                    ) if last_silence['duration'] > 0 else last_silence['video_end_frame'],
-                    'duration': use_duration,
-                    'start_time': last_silence['start_time'],
-                    'end_time': last_silence['start_time'] + use_duration,
-                    'is_silence': True,
-                    'looped': True
-                })
+                use_duration = min(loop_silence['duration'], remaining_duration)
+                selected.append(self._create_silence_clip(loop_silence, use_duration, looped=True))
                 remaining_duration -= use_duration
 
         return selected if selected else None
+
+    def _create_clip(self, seg: Dict, clip_duration: float, **extra_fields) -> Optional[Dict]:
+        """Create a clip dictionary from a segment with the given duration."""
+        num_frames = seg['video_end_frame'] - seg['video_start_frame']
+        end_frame = seg['video_start_frame'] + int(clip_duration * num_frames / seg['duration'])
+
+        # Return None if this would create a zero-frame clip
+        if end_frame <= seg['video_start_frame']:
+            return None
+
+        clip = {
+            'segment_id': seg['segment_id'],
+            'video_path': seg['video_path'],
+            'video_start_frame': seg['video_start_frame'],
+            'video_end_frame': end_frame,
+            'duration': clip_duration,
+            **extra_fields
+        }
+        return clip
+
+    def _loop_segment(self, seg: Dict, remaining_duration: float, start_loop_count: int = 0,
+                      combined: bool = False) -> Tuple[List[Dict], float]:
+        """Loop a segment to fill remaining duration. Returns (clips, remaining_duration)."""
+        clips = []
+        loop_count = start_loop_count
+
+        while remaining_duration > MIN_CLIP_DURATION:
+            clip_duration = min(seg['duration'], remaining_duration)
+            extra = {'loop_iteration': loop_count, 'looped': True}
+            if combined:
+                extra['combined'] = True
+
+            clip = self._create_clip(seg, clip_duration, **extra)
+            if clip is None:
+                break
+
+            clips.append(clip)
+            remaining_duration -= clip_duration
+            loop_count += 1
+
+        return clips, remaining_duration
 
     def handle_duration(self, source_segments: List[Dict], target_duration: float) -> List[Dict]:
         """
@@ -385,114 +428,59 @@ class PitchMatcher:
         Returns:
             List of clip instructions with timing info
         """
+        if not source_segments:
+            return []
+
         clips = []
 
-        if len(source_segments) == 0:
-            return clips
-
-        # If we have one segment
+        # Single segment case
         if len(source_segments) == 1:
             seg = source_segments[0]
 
             if seg['duration'] >= target_duration:
                 # Trim to fit
-                num_frames = seg['video_end_frame'] - seg['video_start_frame']
-                trimmed_frames = int(target_duration * num_frames / seg['duration'])
-                clips.append({
-                    'segment_id': seg['segment_id'],
-                    'video_path': seg['video_path'],
-                    'video_start_frame': seg['video_start_frame'],
-                    'video_end_frame': seg['video_start_frame'] + trimmed_frames,
-                    'duration': target_duration,
-                    'trim': True,
-                    'original_duration': seg['duration']
-                })
+                clip = self._create_clip(seg, target_duration, trim=True, original_duration=seg['duration'])
+                if clip:
+                    clips.append(clip)
             else:
                 # Need to loop
-                remaining_duration = target_duration
-                loop_count = 0
-
-                # Minimum clip duration (1 frame at 24fps = ~0.042s, use 0.04s)
-                MIN_CLIP_DURATION = 0.04
-
-                while remaining_duration > MIN_CLIP_DURATION:
-                    clip_duration = min(seg['duration'], remaining_duration)
-                    num_frames = seg['video_end_frame'] - seg['video_start_frame']
-                    end_frame = seg['video_start_frame'] + int(clip_duration * num_frames / seg['duration'])
-
-                    # Skip if this would create a zero-frame clip
-                    if end_frame <= seg['video_start_frame']:
-                        break
-
-                    clips.append({
-                        'segment_id': seg['segment_id'],
-                        'video_path': seg['video_path'],
-                        'video_start_frame': seg['video_start_frame'],
-                        'video_end_frame': end_frame,
-                        'duration': clip_duration,
-                        'loop_iteration': loop_count,
-                        'looped': True
-                    })
-                    remaining_duration -= clip_duration
-                    loop_count += 1
-
+                loop_clips, _ = self._loop_segment(seg, target_duration)
+                clips.extend(loop_clips)
         else:
             # Combine multiple segments
             remaining_duration = target_duration
-
-            # Minimum clip duration (1 frame at 24fps = ~0.042s, use 0.04s)
-            MIN_CLIP_DURATION = 0.04
 
             for seg in source_segments:
                 if remaining_duration <= MIN_CLIP_DURATION:
                     break
 
                 clip_duration = min(seg['duration'], remaining_duration)
-                num_frames = seg['video_end_frame'] - seg['video_start_frame']
-                end_frame = seg['video_start_frame'] + int(clip_duration * num_frames / seg['duration'])
-
-                # Skip if this would create a zero-frame clip
-                if end_frame <= seg['video_start_frame']:
-                    continue
-
-                clips.append({
-                    'segment_id': seg['segment_id'],
-                    'video_path': seg['video_path'],
-                    'video_start_frame': seg['video_start_frame'],
-                    'video_end_frame': end_frame,
-                    'duration': clip_duration,
-                    'combined': True
-                })
-                remaining_duration -= clip_duration
+                clip = self._create_clip(seg, clip_duration, combined=True)
+                if clip:
+                    clips.append(clip)
+                    remaining_duration -= clip_duration
 
             # If still need more duration, loop the last segment
-            if remaining_duration > MIN_CLIP_DURATION and len(source_segments) > 0:
-                seg = source_segments[-1]
-                loop_count = 1
-
-                while remaining_duration > MIN_CLIP_DURATION:
-                    clip_duration = min(seg['duration'], remaining_duration)
-                    num_frames = seg['video_end_frame'] - seg['video_start_frame']
-                    end_frame = seg['video_start_frame'] + int(clip_duration * num_frames / seg['duration'])
-
-                    # Skip if this would create a zero-frame clip
-                    if end_frame <= seg['video_start_frame']:
-                        break
-
-                    clips.append({
-                        'segment_id': seg['segment_id'],
-                        'video_path': seg['video_path'],
-                        'video_start_frame': seg['video_start_frame'],
-                        'video_end_frame': end_frame,
-                        'duration': clip_duration,
-                        'loop_iteration': loop_count,
-                        'looped': True,
-                        'combined': True
-                    })
-                    remaining_duration -= clip_duration
-                    loop_count += 1
+            if remaining_duration > MIN_CLIP_DURATION:
+                loop_clips, _ = self._loop_segment(
+                    source_segments[-1], remaining_duration, start_loop_count=1, combined=True
+                )
+                clips.extend(loop_clips)
 
         return clips
+
+    def _build_guide_match(self, guide_seg: Dict, position: int, **extra_fields) -> Dict:
+        """Build a match dictionary with common guide segment fields."""
+        match = {
+            'guide_segment_id': position,
+            'guide_pitch_note': guide_seg.get('pitch_note', 'REST'),
+            'guide_pitch_midi': guide_seg.get('pitch_midi', -1),
+            'guide_start_time': guide_seg['start_time'],
+            'guide_end_time': guide_seg['end_time'],
+            'guide_duration': guide_seg['duration'],
+            **extra_fields
+        }
+        return match
 
     def match_guide_to_source(self):
         """Main matching logic - match each guide segment to source."""
@@ -502,36 +490,31 @@ class PitchMatcher:
         exact_matches = 0
         transposed_matches = 0
         missing_matches = 0
-
         rest_count = 0
+
         for i, guide_seg in enumerate(self.guide_sequence):
             if (i + 1) % 10 == 0:
                 print(f"Processing segment {i+1}/{total_segments}...")
 
-            # Check if this is a rest segment
+            # Handle rest segments
             if guide_seg.get('is_rest', False) or guide_seg.get('pitch_midi', 0) == -1:
-                # Find silence segments from source database
                 silence_clips = self.find_silence_match(guide_seg['duration'])
-                self.matches.append({
-                    'guide_segment_id': i,
-                    'guide_pitch_note': 'REST',
-                    'guide_pitch_midi': -1,
-                    'guide_start_time': guide_seg['start_time'],
-                    'guide_end_time': guide_seg['end_time'],
-                    'guide_duration': guide_seg['duration'],
-                    'match_type': 'rest',
-                    'source_clips': silence_clips if silence_clips else []
-                })
+                self.matches.append(self._build_guide_match(
+                    guide_seg, i,
+                    guide_pitch_note='REST',
+                    guide_pitch_midi=-1,
+                    match_type='rest',
+                    source_clips=silence_clips or []
+                ))
                 rest_count += 1
                 continue
 
             # Try exact match first
             source_match = self.find_exact_match(guide_seg, i)
+            transpose_semitones = 0
 
             if source_match:
-                # Exact match found
                 match_type = 'exact'
-                transpose_semitones = 0
                 exact_matches += 1
             else:
                 # Try transposition
@@ -544,46 +527,31 @@ class PitchMatcher:
                 else:
                     # No match found
                     self.missing_pitches.add(guide_seg['pitch_midi'])
-                    match_type = 'missing'
-                    transpose_semitones = 0
                     missing_matches += 1
-
-                    # Create placeholder match
-                    self.matches.append({
-                        'guide_segment_id': i,
-                        'guide_pitch_note': guide_seg['pitch_note'],
-                        'guide_pitch_midi': guide_seg['pitch_midi'],
-                        'guide_start_time': guide_seg['start_time'],
-                        'guide_end_time': guide_seg['end_time'],
-                        'guide_duration': guide_seg['duration'],
-                        'match_type': 'missing',
-                        'source_clips': []
-                    })
+                    self.matches.append(self._build_guide_match(
+                        guide_seg, i,
+                        match_type='missing',
+                        source_clips=[]
+                    ))
                     continue
 
-            # Handle duration
+            # Handle duration and record match
             clips = self.handle_duration([source_match], guide_seg['duration'])
-
-            # Record match
-            self.matches.append({
-                'guide_segment_id': i,
-                'guide_pitch_note': guide_seg['pitch_note'],
-                'guide_pitch_midi': guide_seg['pitch_midi'],
-                'guide_start_time': guide_seg['start_time'],
-                'guide_end_time': guide_seg['end_time'],
-                'guide_duration': guide_seg['duration'],
-                'match_type': match_type,
-                'transpose_semitones': transpose_semitones,
-                'source_segment_id': source_match['segment_id'],
-                'source_pitch_note': source_match['pitch_note'],
-                'source_pitch_midi': source_match['pitch_midi'],
-                'source_clips': clips
-            })
+            self.matches.append(self._build_guide_match(
+                guide_seg, i,
+                match_type=match_type,
+                transpose_semitones=transpose_semitones,
+                source_segment_id=source_match['segment_id'],
+                source_pitch_note=source_match['pitch_note'],
+                source_pitch_midi=source_match['pitch_midi'],
+                source_clips=clips
+            ))
 
             # Update usage tracking
             self.segment_usage[source_match['segment_id']] += 1
             self.last_used_position[source_match['segment_id']] = i
 
+        # Print summary
         print(f"\n=== Matching Complete ===")
         print(f"Total guide segments: {total_segments}")
         print(f"Exact matches: {exact_matches}")
@@ -593,8 +561,7 @@ class PitchMatcher:
 
         if self.missing_pitches:
             print(f"\nMissing pitches (not in source database):")
-            missing_notes = sorted(self.missing_pitches)
-            for midi in missing_notes:
+            for midi in sorted(self.missing_pitches):
                 print(f"  {midi_to_note_name(midi)} (MIDI {midi})")
 
         # Reuse statistics

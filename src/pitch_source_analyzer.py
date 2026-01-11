@@ -13,10 +13,9 @@ import argparse
 import json
 import numpy as np
 import librosa
-import soundfile as sf
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 from collections import defaultdict
 
 # Import pitch change detection
@@ -107,30 +106,23 @@ class PitchSourceAnalyzer:
         print(f"Output: {audio_path}")
 
         # Build ffmpeg command
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(self.video_path),
+            '-vn',  # No video
+        ]
+
+        # Add loudnorm filter for EBU R128 normalization if requested
         if normalize:
-            # Use loudnorm filter for EBU R128 normalization
-            # Single-pass mode with reasonable defaults
             af_filter = f'loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=summary'
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', str(self.video_path),
-                '-vn',  # No video
-                '-af', af_filter,
-                '-acodec', 'pcm_s16le',  # PCM 16-bit
-                '-ar', str(sample_rate),  # Sample rate
-                '-ac', '1',  # Mono
-                str(audio_path)
-            ]
-        else:
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', str(self.video_path),
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # PCM 16-bit
-                '-ar', str(sample_rate),  # Sample rate
-                '-ac', '1',  # Mono
-                str(audio_path)
-            ]
+            cmd.extend(['-af', af_filter])
+
+        cmd.extend([
+            '-acodec', 'pcm_s16le',  # PCM 16-bit
+            '-ar', str(sample_rate),  # Sample rate
+            '-ac', '1',  # Mono
+            str(audio_path)
+        ])
 
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -224,26 +216,22 @@ class PitchSourceAnalyzer:
             end_time: End time in seconds
 
         Returns:
-            RMS amplitude in dB (negative values, -inf for silence)
+            RMS amplitude in dB (negative values, -100 for silence)
         """
         if self.audio is None or self.sr is None:
             return 0.0
 
-        start_sample = int(start_time * self.sr)
-        end_sample = int(end_time * self.sr)
-
-        # Clamp to valid range
-        start_sample = max(0, start_sample)
-        end_sample = min(len(self.audio), end_sample)
+        start_sample = max(0, int(start_time * self.sr))
+        end_sample = min(len(self.audio), int(end_time * self.sr))
 
         if end_sample <= start_sample:
-            return -100.0  # Treat as silent
+            return -100.0
 
         audio_segment = self.audio[start_sample:end_sample]
         rms = np.sqrt(np.mean(audio_segment ** 2))
 
         if rms < 1e-10:
-            return -100.0  # Effectively silent
+            return -100.0
 
         return 20 * np.log10(rms)
 
@@ -262,37 +250,31 @@ class PitchSourceAnalyzer:
         if len(pitch_segments) < 2:
             return
 
-        verified_count = 0
-        rejected_count = 0
+        gaps_checked = 0
 
-        # Find gaps between segments
         for i in range(len(pitch_segments) - 1):
-            seg1 = pitch_segments[i]
-            seg2 = pitch_segments[i + 1]
-
-            gap_start = seg1['end_time']
-            gap_end = seg2['start_time']
+            gap_start = pitch_segments[i]['end_time']
+            gap_end = pitch_segments[i + 1]['start_time']
             gap_duration = gap_end - gap_start
 
-            # Only track significant gaps (>50ms)
-            if gap_duration > 0.05:
-                # Verify audio is actually silent
-                rms_db = self._get_rms_db(gap_start, gap_end)
+            if gap_duration <= 0.05:
+                continue
 
-                if rms_db < silence_threshold_db:
-                    self.silence_segments.append({
-                        'start_time': gap_start,
-                        'end_time': gap_end,
-                        'duration': gap_duration,
-                        'video_start_frame': int(gap_start * self.fps),
-                        'video_end_frame': int(gap_end * self.fps),
-                        'rms_db': rms_db
-                    })
-                    verified_count += 1
-                else:
-                    rejected_count += 1
+            gaps_checked += 1
+            rms_db = self._get_rms_db(gap_start, gap_end)
 
-        print(f"  Verified {verified_count} silent gaps (rejected {rejected_count} with audio)")
+            if rms_db < silence_threshold_db:
+                self.silence_segments.append({
+                    'start_time': gap_start,
+                    'end_time': gap_end,
+                    'duration': gap_duration,
+                    'video_start_frame': int(gap_start * self.fps),
+                    'video_end_frame': int(gap_end * self.fps),
+                    'rms_db': rms_db
+                })
+
+        rejected_count = gaps_checked - len(self.silence_segments)
+        print(f"  Verified {len(self.silence_segments)} silent gaps (rejected {rejected_count} with audio)")
 
     def build_database(self, pitch_segments: List[Dict]) -> List[Dict]:
         """
@@ -422,6 +404,15 @@ class PitchSourceAnalyzer:
             for midi, count in pitch_counts[:10]:
                 print(f"  {midi_to_note_name(midi)}: {count} segments")
 
+    def _build_pitch_index_from_database(self, database: List[Dict]) -> defaultdict:
+        """Build pitch index from a database of segments."""
+        pitch_index = defaultdict(list)
+        for segment in database:
+            pitch_index[segment['pitch_midi']].append(segment['segment_id'])
+        for midi in pitch_index:
+            pitch_index[midi].sort()
+        return pitch_index
+
     def save_database(self, output_path: str, append: bool = False):
         """
         Save pitch database to JSON file.
@@ -433,20 +424,12 @@ class PitchSourceAnalyzer:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Load existing data if appending
-        existing_data = None
-        if append and output_path.exists():
-            print(f"\nLoading existing database from: {output_path}")
-            with open(output_path, 'r') as f:
-                existing_data = json.load(f)
-            print(f"  Found {existing_data['num_segments']} existing segments from {len(existing_data.get('source_videos', []))} videos")
-
-        # Calculate total durations for this video
+        # Calculate durations for this video
         total_duration = float(self.audio.shape[0] / self.sr) if self.audio is not None else 0
         musical_duration = sum(seg['duration'] for seg in self.pitch_database)
         silence_duration = sum(seg['duration'] for seg in self.silence_segments)
 
-        # Store video source info with each segment
+        # Video source info
         video_info = {
             'video_path': str(self.video_path),
             'audio_path': str(self.audio_path),
@@ -459,99 +442,69 @@ class PitchSourceAnalyzer:
         }
 
         # Add video_path to each segment for tracking
+        video_path_str = str(self.video_path)
         for seg in self.pitch_database:
-            seg['video_path'] = str(self.video_path)
+            seg['video_path'] = video_path_str
         for seg in self.silence_segments:
-            seg['video_path'] = str(self.video_path)
+            seg['video_path'] = video_path_str
 
-        # Merge with existing data if appending
-        if existing_data:
+        # Load existing data and merge if appending
+        existing_data = None
+        if append and output_path.exists():
+            print(f"\nLoading existing database from: {output_path}")
+            with open(output_path, 'r') as f:
+                existing_data = json.load(f)
+            print(f"  Found {existing_data['num_segments']} existing segments from {len(existing_data.get('source_videos', []))} videos")
+
             # Renumber segment IDs to avoid conflicts
             id_offset = existing_data['num_segments']
             print(f"  Renumbering new segments starting from ID {id_offset}")
-
             for seg in self.pitch_database:
                 seg['segment_id'] += id_offset
 
             # Merge databases
-            combined_database = existing_data['pitch_database'] + self.pitch_database
-            combined_silences = existing_data.get('silence_segments', []) + self.silence_segments
+            self.pitch_database = existing_data['pitch_database'] + self.pitch_database
+            self.silence_segments = existing_data.get('silence_segments', []) + self.silence_segments
+            self.pitch_index = self._build_pitch_index_from_database(self.pitch_database)
 
-            # Rebuild pitch index from combined database
-            combined_pitch_index = defaultdict(list)
-            for segment in combined_database:
-                midi = segment['pitch_midi']
-                segment_id = segment['segment_id']
-                combined_pitch_index[midi].append(segment_id)
-
-            # Sort segment IDs for each MIDI note
-            for midi in combined_pitch_index:
-                combined_pitch_index[midi].sort()
-
-            # Track source videos
-            source_videos = existing_data.get('source_videos', [])
-            source_videos.append(video_info)
-
-            # Update aggregated statistics
+            # Merge source videos and durations
+            source_videos = existing_data.get('source_videos', []) + [video_info]
             total_musical = existing_data.get('total_musical_duration', 0) + musical_duration
             total_silence = existing_data.get('total_silence_duration', 0) + silence_duration
-
-            # Convert pitch index to dict
-            pitch_index_dict = {str(midi): segment_ids for midi, segment_ids in combined_pitch_index.items()}
-
-            # Prepare merged output data
-            data = {
-                'source_videos': source_videos,
-                'num_videos': len(source_videos),
-                'num_segments': len(combined_database),
-                'num_unique_pitches': len(combined_pitch_index),
-                'num_silence_gaps': len(combined_silences),
-                'total_musical_duration': total_musical,
-                'total_silence_duration': total_silence,
-                'pitch_database': combined_database,
-                'silence_segments': combined_silences,
-                'pitch_index': pitch_index_dict
-            }
-
-            self.pitch_database = combined_database
-            self.silence_segments = combined_silences
-            self.pitch_index = combined_pitch_index
-
         else:
-            # New database (not appending)
-            # Convert defaultdict to regular dict for JSON serialization
-            pitch_index_dict = {str(midi): segment_ids for midi, segment_ids in self.pitch_index.items()}
+            source_videos = [video_info]
+            total_musical = musical_duration
+            total_silence = silence_duration
 
-            # Prepare output data
-            data = {
-                'source_videos': [video_info],
-                'num_videos': 1,
-                'num_segments': len(self.pitch_database),
-                'num_unique_pitches': len(self.pitch_index),
-                'num_silence_gaps': len(self.silence_segments),
-                'total_musical_duration': musical_duration,
-                'total_silence_duration': silence_duration,
-                'pitch_database': self.pitch_database,
-                'silence_segments': self.silence_segments,
-                'pitch_index': pitch_index_dict
-            }
+        # Prepare output data
+        pitch_index_dict = {str(midi): segment_ids for midi, segment_ids in self.pitch_index.items()}
+        data = {
+            'source_videos': source_videos,
+            'num_videos': len(source_videos),
+            'num_segments': len(self.pitch_database),
+            'num_unique_pitches': len(self.pitch_index),
+            'num_silence_gaps': len(self.silence_segments),
+            'total_musical_duration': total_musical,
+            'total_silence_duration': total_silence,
+            'pitch_database': self.pitch_database,
+            'silence_segments': self.silence_segments,
+            'pitch_index': pitch_index_dict
+        }
 
-        # Save to JSON
         with open(output_path, 'w') as f:
             json.dump(data, f, indent=2)
 
+        # Print summary
         print(f"\nSaved pitch database to: {output_path}")
-        if append and existing_data:
+        if existing_data:
             print(f"Total videos in database: {data['num_videos']}")
         print(f"Total segments: {len(self.pitch_database)}")
         print(f"Unique pitches: {len(self.pitch_index)}")
         print(f"Silent gaps: {len(self.silence_segments)}")
 
-        # Print statistics
-        if len(self.pitch_database) > 0:
+        if self.pitch_database:
             durations = [seg['duration'] for seg in self.pitch_database]
             confidences = [seg['pitch_confidence'] for seg in self.pitch_database]
-
             print(f"\nCombined database statistics:")
             print(f"  Total segments: {len(self.pitch_database)}")
             print(f"  Average segment duration: {np.mean(durations):.3f}s")

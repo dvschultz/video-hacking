@@ -314,6 +314,27 @@ class MIDIGuideConverter:
             segment_index += 1
             current_time = note_end
 
+        # Check for trailing rest after the last note
+        # The MIDI file might have additional duration beyond the last note
+        midi_total_duration = self.midi_file.length
+        if current_time < midi_total_duration:
+            trailing_gap = midi_total_duration - current_time
+            if trailing_gap >= min_rest_duration:
+                rest_segment = {
+                    'index': segment_index,
+                    'start_time': current_time,
+                    'end_time': midi_total_duration,
+                    'duration': trailing_gap,
+                    'pitch_hz': 0.0,
+                    'pitch_midi': -1,
+                    'pitch_note': 'REST',
+                    'pitch_confidence': 1.0,
+                    'is_rest': True
+                }
+                segments.append(rest_segment)
+                segment_index += 1
+                print(f"  Added trailing rest: {trailing_gap:.2f}s")
+
         self.pitch_segments = segments
         note_count = sum(1 for s in segments if not s.get('is_rest', False))
         rest_count = sum(1 for s in segments if s.get('is_rest', False))

@@ -14,6 +14,8 @@ from typing import List, Dict
 import tempfile
 import shutil
 
+from edl_generator import EDLGenerator
+
 
 class VideoAssembler:
     """Cut and reassemble video based on audio-video matches."""
@@ -361,6 +363,53 @@ class VideoAssembler:
 
         print(f"\nTotal segments: {len(self.matches)}")
 
+    def generate_edl(self, output_path: str, frame_rate: float = 24.0) -> str:
+        """
+        Generate EDL file from matches.
+
+        Args:
+            output_path: Path for output EDL file
+            frame_rate: Frame rate for timecode conversion
+
+        Returns:
+            Path to generated EDL file
+        """
+        print(f"\n=== Generating EDL ===")
+        print(f"Frame rate: {frame_rate} fps")
+
+        # Determine title from output path
+        title = Path(output_path).stem
+
+        edl = EDLGenerator(title, frame_rate=frame_rate)
+
+        for i, match in enumerate(self.matches):
+            # Get video timing
+            video_start = match['video_start_time']
+            audio_duration = match['audio_duration']
+
+            # Build comment
+            comment_parts = [f"Audio segment {match.get('audio_segment_index', i)}"]
+            similarity = match.get('similarity_score', 0)
+            if similarity:
+                comment_parts.append(f"Similarity: {similarity:.3f}")
+            if match.get('is_reused'):
+                comment_parts.append(f"Reuse #{match.get('usage_count', 1)}")
+
+            edl.add_event(
+                source_path=str(self.video_path),
+                source_in=video_start,
+                source_out=video_start + audio_duration,
+                comment=", ".join(comment_parts)
+            )
+
+        # Write EDL
+        edl_path = edl.write(output_path)
+        print(f"EDL saved to: {edl_path}")
+        print(f"  Events: {edl.event_count}")
+        print(f"  Total duration: {edl.total_duration:.2f}s")
+
+        return edl_path
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -374,6 +423,14 @@ def main():
                        help='Path to matches JSON file')
     parser.add_argument('--output', required=True,
                        help='Path for output video file')
+    parser.add_argument('--fps', type=float, default=24.0,
+                       help='Frame rate for EDL timecode (default: 24.0)')
+    parser.add_argument('--edl', action='store_true',
+                       help='Generate EDL file alongside video')
+    parser.add_argument('--edl-only', action='store_true',
+                       help='Generate EDL file only, skip video assembly')
+    parser.add_argument('--edl-output', type=str,
+                       help='Custom EDL output path (default: same as output with .edl extension)')
 
     args = parser.parse_args()
 
@@ -390,6 +447,12 @@ def main():
         print("  Linux: sudo apt-get install ffmpeg")
         sys.exit(1)
 
+    # Determine EDL output path
+    if args.edl_output:
+        edl_output_path = args.edl_output
+    else:
+        edl_output_path = str(Path(args.output).with_suffix('.edl'))
+
     # Initialize assembler
     assembler = VideoAssembler(
         video_path=args.video,
@@ -398,8 +461,17 @@ def main():
         output_path=args.output
     )
 
+    # Handle EDL-only mode
+    if args.edl_only:
+        assembler.generate_edl(edl_output_path, frame_rate=args.fps)
+        return
+
     # Run assembly
     assembler.assemble()
+
+    # Generate EDL if requested
+    if args.edl:
+        assembler.generate_edl(edl_output_path, frame_rate=args.fps)
 
 
 if __name__ == '__main__':

@@ -25,12 +25,17 @@ if [ $# -lt 1 ]; then
     echo "  --parallel N        Parallel workers (default: auto)"
     echo "  --no-audio          Output video only"
     echo "  --no-cleanup        Keep temp files"
+    echo "  --edl               Generate EDL file alongside video"
+    echo "  --edl-only          Generate EDL file only (skip video assembly)"
+    echo "  --edl-output PATH   Custom EDL output path"
     echo ""
     echo "Examples:"
     echo "  $0 data/segments/duration_match_plan.json"
     echo "  $0 data/segments/duration_match_plan.json --auto-resolution --auto-fps"
     echo "  $0 data/segments/duration_match_plan.json --resolution 1280x720 --fps 30"
     echo "  $0 data/segments/duration_match_plan.json --output custom_output.mp4"
+    echo "  $0 data/segments/duration_match_plan.json --edl"
+    echo "  $0 data/segments/duration_match_plan.json --edl-only --fps 24"
     exit 1
 fi
 

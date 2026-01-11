@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
+from edl_generator import EDLGenerator
+
 
 class DurationVideoAssembler:
     """Assembles video from duration match plan."""
@@ -82,8 +84,12 @@ class DurationVideoAssembler:
 
         stats = self.match_plan['statistics']
         print(f"  Duration matches: {stats['matched_segments']}")
+        if stats.get('matched_rest_segments', 0) > 0:
+            print(f"  Rests matched with clips: {stats['matched_rest_segments']}")
         print(f"  Unmatched: {stats['unmatched_segments']}")
-        print(f"  Rest segments: {stats['rest_segments']}")
+        # Handle both old and new field names for backwards compatibility
+        rest_count = stats.get('rest_segments_black_frames', stats.get('rest_segments', 0))
+        print(f"  Rest segments (black frames): {rest_count}")
         print(f"  Total output duration: {stats['total_output_duration']:.1f}s")
 
     def get_video_resolution(self, video_path: str) -> Tuple[int, int]:
@@ -174,30 +180,169 @@ class DurationVideoAssembler:
             'unique_fps': list(set(fps_values))
         }
 
-    def extract_clip(self, video_path: str, start_frame: int, end_frame: int,
-                     fps: float, output_path: str):
+    def prompt_for_resolution(self, analysis: Dict) -> Tuple[int, int]:
+        """
+        Prompt user to select output resolution.
+
+        Args:
+            analysis: Resolution analysis from analyze_source_videos()
+
+        Returns:
+            Tuple of (width, height) selected by user
+        """
+        # Reset terminal settings in case subprocess messed them up
+        os.system('stty sane 2>/dev/null')
+
+        print("\n=== Select Output Resolution ===")
+        print("")
+
+        # Build options
+        options = []
+
+        # Option 1: Smallest dimensions (recommended for no upscaling)
+        min_w, min_h = analysis['min_width'], analysis['min_height']
+        options.append((min_w, min_h, "smallest (no upscaling)"))
+
+        # Add unique resolutions as options
+        for res in sorted(analysis['unique_resolutions'], reverse=True):
+            if res != (min_w, min_h):
+                options.append((res[0], res[1], "from sources"))
+
+        # Common presets if not already in list
+        presets = [(1920, 1080, "1080p"), (1280, 720, "720p"), (3840, 2160, "4K")]
+        for w, h, name in presets:
+            if not any(o[0] == w and o[1] == h for o in options):
+                options.append((w, h, name))
+
+        # Display options
+        for i, (w, h, desc) in enumerate(options):
+            marker = " (recommended)" if i == 0 else ""
+            print(f"  {i + 1}. {w}x{h} - {desc}{marker}")
+        print(f"  {len(options) + 1}. Custom resolution")
+
+        # Get user input
+        while True:
+            try:
+                choice = input(f"\nSelect option [1-{len(options) + 1}] (default: 1): ").strip()
+                if choice == "":
+                    choice = 1
+                else:
+                    choice = int(choice)
+
+                if 1 <= choice <= len(options):
+                    selected = options[choice - 1]
+                    print(f"\nUsing resolution: {selected[0]}x{selected[1]}")
+                    return (selected[0], selected[1])
+                elif choice == len(options) + 1:
+                    custom = input("Enter resolution (WxH, e.g., 1280x720): ").strip()
+                    w, h = map(int, custom.lower().split('x'))
+                    print(f"\nUsing custom resolution: {w}x{h}")
+                    return (w, h)
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(options) + 1}")
+            except (ValueError, KeyboardInterrupt):
+                print("\nUsing default (smallest resolution)")
+                return (min_w, min_h)
+
+    def prompt_for_fps(self, analysis: Dict) -> float:
+        """
+        Prompt user to select output frame rate.
+
+        Args:
+            analysis: Analysis from analyze_source_videos()
+
+        Returns:
+            Frame rate selected by user
+        """
+        # Reset terminal settings in case subprocess messed them up
+        os.system('stty sane 2>/dev/null')
+
+        print("\n=== Select Output Frame Rate ===")
+        print("")
+
+        # Build options
+        options = []
+
+        # Common frame rates
+        common_fps = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
+
+        # Add source frame rates first
+        for fps in sorted(analysis['unique_fps']):
+            label = f"{fps:.2f} fps (from sources)"
+            if fps == analysis['min_fps']:
+                label = f"{fps:.2f} fps (smallest from sources)"
+            options.append((fps, label))
+
+        # Add common presets not already in list
+        for fps in common_fps:
+            # Check if close to any existing option
+            if not any(abs(o[0] - fps) < 0.1 for o in options):
+                options.append((fps, f"{fps:.2f} fps"))
+
+        # Sort by fps
+        options = sorted(options, key=lambda x: x[0])
+
+        # Move smallest source fps to top as recommended
+        min_fps = analysis['min_fps']
+        for i, (fps, label) in enumerate(options):
+            if abs(fps - min_fps) < 0.1:
+                options.insert(0, options.pop(i))
+                break
+
+        # Display options
+        for i, (fps, desc) in enumerate(options):
+            marker = " (recommended)" if i == 0 else ""
+            print(f"  {i + 1}. {desc}{marker}")
+        print(f"  {len(options) + 1}. Custom frame rate")
+
+        # Get user input
+        while True:
+            try:
+                choice = input(f"\nSelect option [1-{len(options) + 1}] (default: 1): ").strip()
+                if choice == "":
+                    choice = 1
+                else:
+                    choice = int(choice)
+
+                if 1 <= choice <= len(options):
+                    selected = options[choice - 1]
+                    print(f"\nUsing frame rate: {selected[0]:.2f} fps")
+                    return selected[0]
+                elif choice == len(options) + 1:
+                    custom = input("Enter frame rate (e.g., 30): ").strip()
+                    fps = float(custom)
+                    print(f"\nUsing custom frame rate: {fps:.2f} fps")
+                    return fps
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(options) + 1}")
+            except (ValueError, KeyboardInterrupt):
+                print("\nUsing default (smallest source fps)")
+                return min_fps
+
+    def extract_clip(self, video_path: str, start_frame: int, fps: float,
+                     target_duration: float, output_path: str):
         """
         Extract video clip using ffmpeg with accurate seeking.
 
         Args:
             video_path: Source video path
             start_frame: Start frame number
-            end_frame: End frame number (exclusive)
             fps: Video frame rate
+            target_duration: Exact duration to extract (from guide)
             output_path: Output clip path
         """
         start_time = start_frame / fps
-        duration = (end_frame - start_frame) / fps
 
-        if duration <= 0:
-            duration = 0.1  # Minimum duration
+        if target_duration <= 0:
+            target_duration = 0.1  # Minimum duration
 
-        # Build ffmpeg command
+        # Build ffmpeg command with output-seeking for accuracy
+        # Use -ss after -i for frame-accurate seeking (slower but precise)
         cmd = [
             'ffmpeg', '-y',
             '-i', str(video_path),
-            '-ss', str(start_time),
-            '-t', str(duration),
+            '-ss', f'{start_time:.6f}',  # Seek after input for accuracy
+            '-t', f'{target_duration:.6f}',  # Use high precision duration
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-crf', '18',
@@ -276,12 +421,13 @@ class DurationVideoAssembler:
             for clip_idx, source_clip in enumerate(match.get('source_clips', [])):
                 video_path = source_clip['video_path']
                 start_frame = source_clip['video_start_frame']
-                end_frame = source_clip['video_end_frame']
+                # Use the exact target duration from guide, not calculated from frames
+                target_duration = source_clip.get('duration', match['guide_duration'])
 
                 fps = self.get_video_fps(video_path)
                 output_path = self.temp_dir / f"match_{match_idx:04d}_clip_{clip_idx:02d}.mp4"
 
-                self.extract_clip(video_path, start_frame, end_frame, fps, str(output_path))
+                self.extract_clip(video_path, start_frame, fps, target_duration, str(output_path))
                 clips.append(str(output_path))
 
         elif match_type == 'unmatched':
@@ -322,10 +468,12 @@ class DurationVideoAssembler:
 
         normalized_path = Path(temp_dir) / f"normalized_{idx:04d}.mp4"
 
+        # Only scale resolution here - don't change frame rate
+        # Frame rate conversion happens in final concatenation to preserve exact duration
         cmd = [
             'ffmpeg', '-y',
             '-i', str(clip_file),
-            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}',
+            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2',
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-crf', '18',
@@ -411,13 +559,25 @@ class DurationVideoAssembler:
             for clip_file in normalized_clips:
                 f.write(f"file '{Path(clip_file).absolute()}'\n")
 
-        # Concatenate
+        # Calculate expected total duration from match plan
+        expected_duration = sum(m['guide_duration'] for m in self.matches)
+        print(f"Expected output duration: {expected_duration:.4f}s")
+
+        # Concatenate with re-encode
+        # Use -r for exact frame rate and -t for exact duration
         cmd = [
             'ffmpeg', '-y',
             '-f', 'concat',
             '-safe', '0',
             '-i', str(concat_file),
-            '-c', 'copy',
+            '-r', str(target_fps),  # Force exact frame rate
+            '-t', f'{expected_duration:.6f}',  # Force exact duration
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '18',
+            '-c:a', 'aac',
+            '-ar', '44100',
+            '-b:a', '320k',
             str(self.output_path)
         ]
 
@@ -454,13 +614,19 @@ class DurationVideoAssembler:
             analysis = self.analyze_source_videos()
 
             if need_resolution:
-                self.target_width = analysis['min_width']
-                self.target_height = analysis['min_height']
-                print(f"\nUsing resolution: {self.target_width}x{self.target_height}")
+                if skip_resolution_prompt:
+                    self.target_width = analysis['min_width']
+                    self.target_height = analysis['min_height']
+                    print(f"\nUsing resolution: {self.target_width}x{self.target_height}")
+                else:
+                    self.target_width, self.target_height = self.prompt_for_resolution(analysis)
 
             if need_fps:
-                self.target_fps = analysis['min_fps']
-                print(f"Using frame rate: {self.target_fps:.2f} fps")
+                if skip_fps_prompt:
+                    self.target_fps = analysis['min_fps']
+                    print(f"Using frame rate: {self.target_fps:.2f} fps")
+                else:
+                    self.target_fps = self.prompt_for_fps(analysis)
 
         # Process all matches
         all_clips = []
@@ -483,6 +649,80 @@ class DurationVideoAssembler:
         self.concatenate_clips(all_clips)
 
         print("\n=== Video Assembly Complete ===")
+
+    def generate_edl(self, output_path: str, frame_rate: float = None) -> str:
+        """
+        Generate EDL file from match plan.
+
+        Args:
+            output_path: Path for output EDL file
+            frame_rate: Frame rate for timecode (uses target_fps if None)
+
+        Returns:
+            Path to generated EDL file
+        """
+        if frame_rate is None:
+            frame_rate = self.target_fps or 24.0
+
+        print(f"\n=== Generating EDL ===")
+        print(f"Frame rate: {frame_rate} fps")
+
+        # Determine title from output path
+        title = Path(output_path).stem
+
+        edl = EDLGenerator(title, frame_rate=frame_rate)
+
+        # Build a mapping of video paths to their fps for accurate source timecode
+        video_fps_map = {}
+
+        for match in self.matches:
+            match_type = match.get('match_type', 'unknown')
+            guide_duration = match.get('guide_duration', 0)
+
+            if match_type == 'rest' or match_type == 'unmatched':
+                # Black/rest segment
+                comment = f"Guide segment {match.get('guide_segment_id', '?')}"
+                if match.get('is_rest'):
+                    comment += " (REST)"
+                edl.add_black(guide_duration, comment=comment)
+            else:
+                # Video clip
+                source_clips = match.get('source_clips', [])
+                if source_clips:
+                    clip = source_clips[0]
+                    video_path = clip.get('video_path', '')
+
+                    # Get source video fps (cached)
+                    if video_path not in video_fps_map:
+                        video_fps_map[video_path] = self.get_video_fps(video_path)
+                    source_fps = video_fps_map[video_path]
+
+                    # Calculate source timecode from frames
+                    start_frame = clip.get('video_start_frame', 0)
+                    clip_duration = clip.get('duration', guide_duration)
+                    source_in = start_frame / source_fps
+                    source_out = source_in + clip_duration
+
+                    # Build comment
+                    comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                    crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
+                    if crop_mode:
+                        comment_parts.append(f"Crop: {crop_mode}")
+
+                    edl.add_event(
+                        source_path=video_path,
+                        source_in=source_in,
+                        source_out=source_out,
+                        comment=", ".join(comment_parts)
+                    )
+
+        # Write EDL
+        edl_path = edl.write(output_path)
+        print(f"EDL saved to: {edl_path}")
+        print(f"  Events: {edl.event_count}")
+        print(f"  Total duration: {edl.total_duration:.2f}s")
+
+        return edl_path
 
     def cleanup(self):
         """Clean up temporary files."""
@@ -531,6 +771,12 @@ Examples:
                         help='Output video only, no audio')
     parser.add_argument('--no-cleanup', action='store_true',
                         help='Keep temp files for debugging')
+    parser.add_argument('--edl', action='store_true',
+                        help='Generate EDL file alongside video')
+    parser.add_argument('--edl-only', action='store_true',
+                        help='Generate EDL file only, skip video assembly')
+    parser.add_argument('--edl-output', type=str,
+                        help='Custom EDL output path (default: same as video with .edl extension)')
 
     args = parser.parse_args()
 
@@ -554,6 +800,12 @@ Examples:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Determine EDL output path
+    if args.edl_output:
+        edl_output_path = args.edl_output
+    else:
+        edl_output_path = str(output_path.with_suffix('.edl'))
+
     # Create assembler
     assembler = DurationVideoAssembler(
         args.match_plan,
@@ -567,10 +819,23 @@ Examples:
     )
 
     assembler.load_match_plan()
+
+    # Handle EDL-only mode
+    if args.edl_only:
+        # For EDL-only, we need fps but don't need to process video
+        fps = args.fps or 24.0
+        assembler.generate_edl(edl_output_path, frame_rate=fps)
+        return 0
+
+    # Normal assembly
     assembler.assemble_video(
         skip_resolution_prompt=args.auto_resolution or target_width is not None,
         skip_fps_prompt=args.auto_fps or args.fps is not None
     )
+
+    # Generate EDL if requested
+    if args.edl:
+        assembler.generate_edl(edl_output_path)
 
     if not args.no_cleanup:
         assembler.cleanup()

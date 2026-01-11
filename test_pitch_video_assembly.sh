@@ -26,6 +26,9 @@ if [ $# -lt 1 ]; then
     echo "  --parallel N        Number of parallel workers for normalization (default: auto, max 8)"
     echo "  --true-silence      Use black frames + muted audio for rests (instead of source silence clips)"
     echo "  --no-cleanup        Keep temporary files for debugging"
+    echo "  --edl               Generate EDL file alongside video"
+    echo "  --edl-only          Generate EDL file only (skip video assembly)"
+    echo "  --edl-output PATH   Custom EDL output path"
     echo ""
     echo "Examples:"
     echo "  # Basic usage (will prompt for resolution and fps):"
@@ -39,6 +42,9 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "  # Custom output location:"
     echo "  $0 data/segments/match_plan.json --output videos/final.mp4"
+    echo ""
+    echo "  # Generate EDL for NLE import:"
+    echo "  $0 data/segments/match_plan.json --edl-only --fps 24"
     exit 1
 fi
 
