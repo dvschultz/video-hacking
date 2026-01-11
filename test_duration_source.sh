@@ -25,6 +25,7 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Examples:"
     echo "  $0 /path/to/clips"
+    echo "  $0 /path/to/clips --output my_database.json"
     echo "  $0 /path/to/clips --extensions mp4,mov"
     echo "  $0 /path/to/more_clips --append"
     echo "  $0 /path/to/clips --recursive --min-duration 0.5"
@@ -44,11 +45,18 @@ fi
 OUTPUT_DIR="data/segments"
 OUTPUT_JSON="$OUTPUT_DIR/duration_database.json"
 
-# Check if user provided custom output path
-for arg in "$@"; do
-    if [[ "$arg" == "--output" ]]; then
-        CUSTOM_OUTPUT=true
-        break
+# Parse --output argument if provided and build filtered args
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        OUTPUT_DIR=$(dirname "$OUTPUT_JSON")
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
     fi
 done
 
@@ -67,23 +75,13 @@ fi
 
 echo -e "${GREEN}Building duration database from folder${NC}"
 echo "Input: $FOLDER_PATH"
+echo "Output: $OUTPUT_JSON"
+echo ""
 
-# Build command with conditional output flag
-if [ -z "$CUSTOM_OUTPUT" ]; then
-    echo "Output: $OUTPUT_JSON"
-    echo ""
-    $PYTHON_CMD src/duration_source_analyzer.py \
-        --folder "$FOLDER_PATH" \
-        --output "$OUTPUT_JSON" \
-        "$@"
-else
-    # Let user's --output flag pass through
-    echo "Output: (custom path specified)"
-    echo ""
-    $PYTHON_CMD src/duration_source_analyzer.py \
-        --folder "$FOLDER_PATH" \
-        "$@"
-fi
+$PYTHON_CMD src/duration_source_analyzer.py \
+    --folder "$FOLDER_PATH" \
+    --output "$OUTPUT_JSON" \
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Database Building Complete ===${NC}"

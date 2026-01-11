@@ -600,6 +600,7 @@ Match guide segments to a folder of pre-existing video clips based on duration. 
 ./test_duration_source.sh /path/to/video/clips
 
 # Options:
+#   --output PATH           Output JSON path (default: data/segments/duration_database.json)
 #   --extensions mp4,mov    Video file extensions to include
 #   --recursive             Search subdirectories
 #   --append                Add to existing database

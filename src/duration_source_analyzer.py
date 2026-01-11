@@ -64,6 +64,9 @@ class DurationSourceAnalyzer:
         # Sort by filename for consistent ordering
         video_files = sorted(video_files, key=lambda p: p.name.lower())
 
+        # Filter out hidden files (starting with .)
+        video_files = [f for f in video_files if not f.name.startswith('.')]
+
         print(f"Found {len(video_files)} video files in {self.folder_path}")
         return video_files
 
