@@ -74,10 +74,6 @@ class PitchVideoAssembler:
         self.matches = []
         self.clip_paths = []  # List of temporary clip files
 
-        # Cached video metadata (populated once, reused everywhere)
-        self.video_resolutions = {}  # video_path -> (width, height)
-        self.video_fps_cache = {}    # video_path -> fps
-
     def load_match_plan(self):
         """Load match plan from JSON."""
         print(f"Loading match plan from: {self.match_plan_path}")
@@ -96,7 +92,7 @@ class PitchVideoAssembler:
 
     def get_video_resolution(self, video_path: str) -> Tuple[int, int]:
         """
-        Get video resolution using ffprobe.
+        Get video resolution using ffprobe (cached via lru_cache).
 
         Args:
             video_path: Path to video file
@@ -104,11 +100,11 @@ class PitchVideoAssembler:
         Returns:
             Tuple of (width, height)
         """
-        return video_utils.get_video_resolution(video_path, self.video_resolutions)
+        return video_utils.get_video_resolution(video_path)
 
     def get_video_fps(self, video_path: str) -> float:
         """
-        Get video frame rate using ffprobe (cached).
+        Get video frame rate using ffprobe (cached via lru_cache).
 
         Args:
             video_path: Path to video file
@@ -116,7 +112,7 @@ class PitchVideoAssembler:
         Returns:
             Frame rate as float
         """
-        return video_utils.get_video_fps(video_path, self.video_fps_cache)
+        return video_utils.get_video_fps(video_path)
 
     def analyze_source_videos(self) -> Dict:
         """

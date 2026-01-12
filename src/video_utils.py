@@ -7,33 +7,32 @@ duration_video_assembler.py and pitch_video_assembler.py.
 """
 
 import os
+import platform
 import subprocess
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 
-# Cache for video metadata to avoid repeated ffprobe calls
-_resolution_cache: Dict[str, Tuple[int, int]] = {}
-_fps_cache: Dict[str, float] = {}
+def reset_terminal() -> None:
+    """Reset terminal state after interruption (Unix only)."""
+    if platform.system() != 'Windows':
+        os.system('stty sane 2>/dev/null')
 
 
-def get_video_resolution(video_path: str, cache: Dict[str, Tuple[int, int]] = None) -> Tuple[int, int]:
+@lru_cache(maxsize=256)
+def get_video_resolution(video_path: str) -> Tuple[int, int]:
     """
     Get video resolution using ffprobe.
 
+    Results are cached using lru_cache to avoid repeated ffprobe calls.
+
     Args:
         video_path: Path to video file
-        cache: Optional cache dictionary for storing results
 
     Returns:
         Tuple of (width, height)
     """
-    if cache is None:
-        cache = _resolution_cache
-
-    if video_path in cache:
-        return cache[video_path]
-
     cmd = [
         'ffprobe', '-v', 'error',
         '-select_streams', 'v:0',
@@ -45,30 +44,30 @@ def get_video_resolution(video_path: str, cache: Dict[str, Tuple[int, int]] = No
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
         width, height = map(int, result.stdout.strip().split(','))
-        cache[video_path] = (width, height)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"Invalid resolution: {width}x{height}")
         return (width, height)
     except (subprocess.CalledProcessError, ValueError) as e:
         print(f"Warning: Could not get resolution for {video_path}: {e}")
         return (1920, 1080)  # Default fallback
 
 
-def get_video_fps(video_path: str, cache: Dict[str, float] = None) -> float:
+@lru_cache(maxsize=256)
+def get_video_fps(video_path: str) -> float:
     """
     Get video frame rate using ffprobe.
 
+    Results are cached using lru_cache to avoid repeated ffprobe calls.
+
     Args:
         video_path: Path to video file
-        cache: Optional cache dictionary for storing results
 
     Returns:
         Frame rate as float
+
+    Raises:
+        ValueError: If FPS is zero or negative
     """
-    if cache is None:
-        cache = _fps_cache
-
-    if video_path in cache:
-        return cache[video_path]
-
     cmd = [
         'ffprobe', '-v', 'error',
         '-select_streams', 'v:0',
@@ -82,14 +81,18 @@ def get_video_fps(video_path: str, cache: Dict[str, float] = None) -> float:
         fps_str = result.stdout.strip()
         if '/' in fps_str:
             num, den = fps_str.split('/')
+            if float(den) == 0:
+                raise ValueError("Division by zero in frame rate")
             fps = float(num) / float(den)
         else:
             fps = float(fps_str)
-        cache[video_path] = fps
+
+        if fps <= 0:
+            raise ValueError(f"Invalid FPS ({fps}) returned for {video_path}")
+
         return fps
     except (subprocess.CalledProcessError, ValueError) as e:
         print(f"Warning: Could not get FPS for {video_path}: {e}")
-        cache[video_path] = 24.0
         return 24.0  # Default fallback
 
 
@@ -154,7 +157,7 @@ def prompt_for_resolution(analysis: Dict) -> Tuple[int, int]:
         Tuple of (width, height) selected by user
     """
     # Reset terminal settings in case subprocess messed them up
-    os.system('stty sane 2>/dev/null')
+    reset_terminal()
 
     print("\n=== Select Output Resolution ===")
     print("")
@@ -221,7 +224,7 @@ def prompt_for_fps(analysis: Dict) -> float:
         Frame rate selected by user
     """
     # Reset terminal settings in case subprocess messed them up
-    os.system('stty sane 2>/dev/null')
+    reset_terminal()
 
     print("\n=== Select Output Frame Rate ===")
     print("")
@@ -343,7 +346,17 @@ def generate_black_clip(
         width: Video width
         height: Video height
         fps: Frame rate
+
+    Raises:
+        ValueError: If any parameter is invalid (non-positive)
     """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid dimensions: {width}x{height}")
+    if duration <= 0:
+        raise ValueError(f"Invalid duration: {duration}")
+    if fps <= 0:
+        raise ValueError(f"Invalid fps: {fps}")
+
     cmd = [
         'ffmpeg', '-y',
         '-f', 'lavfi',
@@ -371,5 +384,5 @@ def generate_black_clip(
 
 def clear_caches() -> None:
     """Clear all video metadata caches."""
-    _resolution_cache.clear()
-    _fps_cache.clear()
+    get_video_resolution.cache_clear()
+    get_video_fps.cache_clear()

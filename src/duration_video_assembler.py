@@ -70,10 +70,6 @@ class DurationVideoAssembler:
         self.matches = []
         self.clip_paths = []
 
-        # Cached video metadata
-        self.video_resolutions = {}
-        self.video_fps_cache = {}
-
     def load_match_plan(self):
         """Load match plan from JSON."""
         print(f"Loading match plan from: {self.match_plan_path}")
@@ -94,12 +90,12 @@ class DurationVideoAssembler:
         print(f"  Total output duration: {stats['total_output_duration']:.1f}s")
 
     def get_video_resolution(self, video_path: str) -> Tuple[int, int]:
-        """Get video resolution using ffprobe (cached)."""
-        return video_utils.get_video_resolution(video_path, self.video_resolutions)
+        """Get video resolution using ffprobe (cached via lru_cache)."""
+        return video_utils.get_video_resolution(video_path)
 
     def get_video_fps(self, video_path: str) -> float:
-        """Get video frame rate using ffprobe (cached)."""
-        return video_utils.get_video_fps(video_path, self.video_fps_cache)
+        """Get video frame rate using ffprobe (cached via lru_cache)."""
+        return video_utils.get_video_fps(video_path)
 
     def analyze_source_videos(self) -> Dict:
         """Analyze all unique source videos to find resolutions and frame rates."""

@@ -107,6 +107,11 @@ class TestDurationVideoAssemblerLoadMatchPlan:
 class TestDurationVideoAssemblerVideoMetadata:
     """Test video metadata retrieval."""
 
+    def setup_method(self):
+        """Clear lru_cache before each test to ensure test isolation."""
+        from src import video_utils
+        video_utils.clear_caches()
+
     def test_get_video_resolution(self, temp_dir):
         """Test getting video resolution via ffprobe."""
         match_plan = temp_dir / "plan.json"
@@ -121,13 +126,13 @@ class TestDurationVideoAssemblerVideoMetadata:
         mock_result.stdout = "1920,1080\n"
 
         with patch('subprocess.run', return_value=mock_result):
-            width, height = assembler.get_video_resolution("/path/to/video.mp4")
+            width, height = assembler.get_video_resolution("/path/to/resolution_test_video.mp4")
 
         assert width == 1920
         assert height == 1080
 
     def test_get_video_resolution_cached(self, temp_dir):
-        """Test that resolution is cached."""
+        """Test that resolution is cached via lru_cache."""
         match_plan = temp_dir / "plan.json"
         match_plan.write_text('{"matches": [], "statistics": {}}')
 
@@ -139,11 +144,14 @@ class TestDurationVideoAssemblerVideoMetadata:
         mock_result = MagicMock()
         mock_result.stdout = "1920,1080\n"
 
-        with patch('subprocess.run', return_value=mock_result) as mock_run:
-            assembler.get_video_resolution("/path/to/video.mp4")
-            assembler.get_video_resolution("/path/to/video.mp4")
+        # Use a unique path for this test
+        test_path = "/path/to/cache_test_video.mp4"
 
-            # Should only call subprocess once due to caching
+        with patch('subprocess.run', return_value=mock_result) as mock_run:
+            assembler.get_video_resolution(test_path)
+            assembler.get_video_resolution(test_path)
+
+            # Should only call subprocess once due to lru_cache
             assert mock_run.call_count == 1
 
     def test_get_video_fps(self, temp_dir):
@@ -160,7 +168,7 @@ class TestDurationVideoAssemblerVideoMetadata:
         mock_result.stdout = "24/1\n"
 
         with patch('subprocess.run', return_value=mock_result):
-            fps = assembler.get_video_fps("/path/to/video.mp4")
+            fps = assembler.get_video_fps("/path/to/fps_test_video.mp4")
 
         assert fps == 24.0
 
@@ -178,7 +186,7 @@ class TestDurationVideoAssemblerVideoMetadata:
         mock_result.stdout = "30000/1001\n"
 
         with patch('subprocess.run', return_value=mock_result):
-            fps = assembler.get_video_fps("/path/to/video.mp4")
+            fps = assembler.get_video_fps("/path/to/fps_fractional_video.mp4")
 
         assert abs(fps - 29.97) < 0.01
 
