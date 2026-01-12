@@ -107,7 +107,12 @@ class EDLGenerator:
             title: Project title for EDL header
             frame_rate: Frame rate for timecode conversion (default: 24.0)
             drop_frame: Use drop-frame timecode (for 29.97/59.94 fps)
+
+        Raises:
+            ValueError: If frame_rate is not a positive number
         """
+        if frame_rate <= 0:
+            raise ValueError("Frame rate must be a positive number.")
         self.title = title
         self.frame_rate = frame_rate
         self.drop_frame = drop_frame

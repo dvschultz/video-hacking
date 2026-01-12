@@ -401,7 +401,7 @@ class DurationMatcher:
 
         # Build video path -> fps mapping for efficient lookup
         video_fps_map = {}
-        for db_clip in self.duration_db.get('clips', []):
+        for db_clip in self.duration_database.get('clips', []):
             video_path = db_clip.get('path', '')
             if video_path:
                 video_fps_map[video_path] = db_clip.get('fps', frame_rate)
