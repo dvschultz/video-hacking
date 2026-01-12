@@ -22,6 +22,7 @@ from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
 from pitch_utils import midi_to_note_name
+from edl_generator import EDLGenerator
 
 # Minimum clip duration (1 frame at 24fps = ~0.042s)
 MIN_CLIP_DURATION = 0.04
@@ -629,6 +630,68 @@ class PitchMatcher:
         print(f"\nMatch plan saved to: {output_path}")
         print(f"Total matches: {len(self.matches)}")
 
+    def generate_edl(self, output_path: str, frame_rate: float = 24.0) -> str:
+        """
+        Generate EDL file from match plan.
+
+        Args:
+            output_path: Path for output EDL file
+            frame_rate: Frame rate for timecode conversion
+
+        Returns:
+            Path to generated EDL file
+        """
+        print(f"\n=== Generating EDL ===")
+        print(f"Frame rate: {frame_rate} fps")
+
+        title = Path(output_path).stem
+        edl = EDLGenerator(title, frame_rate=frame_rate)
+
+        for match in self.matches:
+            match_type = match.get('match_type', 'unknown')
+            guide_duration = match.get('guide_duration', 0)
+
+            if match_type == 'rest' or match_type == 'missing':
+                # Black/rest segment
+                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                if match.get('guide_pitch_note'):
+                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                edl.add_black(guide_duration, comment=", ".join(comment_parts))
+            else:
+                # Video clip
+                source_clips = match.get('source_clips', [])
+                if source_clips:
+                    clip = source_clips[0]
+                    video_path = clip.get('video_path', '')
+
+                    # Calculate source timecode from frames
+                    start_frame = clip.get('video_start_frame', 0)
+                    end_frame = clip.get('video_end_frame', start_frame)
+                    source_in = start_frame / frame_rate
+                    source_out = end_frame / frame_rate
+
+                    # Build comment
+                    comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                    if match.get('guide_pitch_note'):
+                        comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                    transpose = match.get('transpose_semitones', 0)
+                    if transpose != 0:
+                        comment_parts.append(f"Transpose: {transpose:+d} semitones")
+
+                    edl.add_event(
+                        source_path=video_path,
+                        source_in=source_in,
+                        source_out=source_out,
+                        comment=", ".join(comment_parts)
+                    )
+
+        edl_path = edl.write(output_path)
+        print(f"EDL saved to: {edl_path}")
+        print(f"  Events: {edl.event_count}")
+        print(f"  Total duration: {edl.total_duration:.2f}s")
+
+        return edl_path
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -711,6 +774,23 @@ def main():
         action='store_true',
         help='Disable combining multiple clips for duration (only loop single clips)'
     )
+    parser.add_argument(
+        '--edl',
+        action='store_true',
+        help='Generate EDL file alongside match plan'
+    )
+    parser.add_argument(
+        '--edl-output',
+        type=str,
+        default=None,
+        help='Custom EDL output path (default: same as output with .edl extension)'
+    )
+    parser.add_argument(
+        '--fps',
+        type=float,
+        default=24.0,
+        help='Frame rate for EDL timecode (default: 24.0)'
+    )
 
     args = parser.parse_args()
 
@@ -746,6 +826,14 @@ def main():
 
     # Save match plan
     matcher.save_match_plan(args.output)
+
+    # Generate EDL if requested
+    if args.edl:
+        if args.edl_output:
+            edl_path = args.edl_output
+        else:
+            edl_path = str(Path(args.output).with_suffix('.edl'))
+        matcher.generate_edl(edl_path, frame_rate=args.fps)
 
     print("\n=== Matching Complete ===")
 

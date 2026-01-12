@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
+from edl_generator import EDLGenerator
+
 
 class DurationMatcher:
     """Matches guide segments to source clips by duration."""
@@ -380,6 +382,73 @@ class DurationMatcher:
 
         print(f"\nSaved match plan to: {output_path}")
 
+    def generate_edl(self, output_path: str, frame_rate: float = 24.0) -> str:
+        """
+        Generate EDL file from match plan.
+
+        Args:
+            output_path: Path for output EDL file
+            frame_rate: Frame rate for timecode conversion
+
+        Returns:
+            Path to generated EDL file
+        """
+        print(f"\n=== Generating EDL ===")
+        print(f"Frame rate: {frame_rate} fps")
+
+        title = Path(output_path).stem
+        edl = EDLGenerator(title, frame_rate=frame_rate)
+
+        for match in self.matches:
+            match_type = match.get('match_type', 'unknown')
+            guide_duration = match.get('guide_duration', 0)
+
+            if match_type == 'rest' or match_type == 'unmatched':
+                # Black/rest segment
+                comment = f"Guide segment {match.get('guide_segment_id', '?')}"
+                if match.get('is_rest'):
+                    comment += " (REST)"
+                edl.add_black(guide_duration, comment=comment)
+            else:
+                # Video clip
+                source_clips = match.get('source_clips', [])
+                if source_clips:
+                    clip = source_clips[0]
+                    video_path = clip.get('video_path', '')
+
+                    # Get source video fps from database or use frame_rate
+                    source_fps = frame_rate
+                    for db_clip in self.duration_db.get('clips', []):
+                        if db_clip.get('path') == video_path:
+                            source_fps = db_clip.get('fps', frame_rate)
+                            break
+
+                    # Calculate source timecode from frames
+                    start_frame = clip.get('video_start_frame', 0)
+                    clip_duration = clip.get('duration', guide_duration)
+                    source_in = start_frame / source_fps
+                    source_out = source_in + clip_duration
+
+                    # Build comment
+                    comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                    crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
+                    if crop_mode:
+                        comment_parts.append(f"Crop: {crop_mode}")
+
+                    edl.add_event(
+                        source_path=video_path,
+                        source_in=source_in,
+                        source_out=source_out,
+                        comment=", ".join(comment_parts)
+                    )
+
+        edl_path = edl.write(output_path)
+        print(f"EDL saved to: {edl_path}")
+        print(f"  Events: {edl.event_count}")
+        print(f"  Total duration: {edl.total_duration:.2f}s")
+
+        return edl_path
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -425,6 +494,12 @@ Examples:
                         help='Use shortest valid clip instead of closest duration')
     parser.add_argument('--match-rests', action='store_true',
                         help='Match rest segments with video clips instead of black frames')
+    parser.add_argument('--edl', action='store_true',
+                        help='Generate EDL file alongside match plan')
+    parser.add_argument('--edl-output', type=str, default=None,
+                        help='Custom EDL output path (default: same as output with .edl extension)')
+    parser.add_argument('--fps', type=float, default=24.0,
+                        help='Frame rate for EDL timecode (default: 24.0)')
 
     args = parser.parse_args()
 
@@ -453,6 +528,14 @@ Examples:
     matcher.load_duration_database()
     matcher.match_guide_to_source()
     matcher.save_match_plan(args.output)
+
+    # Generate EDL if requested
+    if args.edl:
+        if args.edl_output:
+            edl_path = args.edl_output
+        else:
+            edl_path = str(Path(args.output).with_suffix('.edl'))
+        matcher.generate_edl(edl_path, frame_rate=args.fps)
 
     return 0
 

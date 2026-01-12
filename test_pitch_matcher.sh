@@ -29,6 +29,9 @@ if [ $# -lt 2 ]; then
     echo "  --no-transposition      Disable pitch transposition"
     echo "  --max-transpose N       Maximum semitones to transpose (default: 12)"
     echo "  --no-combine-clips      Disable combining clips for duration"
+    echo "  --edl                   Generate EDL file alongside match plan"
+    echo "  --edl-output PATH       Custom EDL output path"
+    echo "  --fps N                 Frame rate for EDL timecode (default: 24)"
     echo ""
     echo "Reuse Policies:"
     echo "  none        - Each source clip used only once (maximum variety)"
@@ -52,6 +55,9 @@ if [ $# -lt 2 ]; then
     echo ""
     echo "  # Adjust scoring weights:"
     echo "  $0 guide.json source.json --duration-weight 0.4 --confidence-weight 0.4 --consistency-weight 0.2"
+    echo ""
+    echo "  # Generate EDL for NLE import:"
+    echo "  $0 guide.json source.json --edl --fps 24"
     exit 1
 fi
 
