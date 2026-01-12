@@ -1051,7 +1051,7 @@ class PitchVideoAssembler:
 
         Args:
             output_path: Path for output EDL file
-            frame_rate: Frame rate for timecode (uses target_fps if None)
+            frame_rate: Frame rate for EDL timecode display (uses target_fps if None)
 
         Returns:
             Path to generated EDL file
@@ -1060,7 +1060,7 @@ class PitchVideoAssembler:
             frame_rate = self.target_fps or 24.0
 
         print(f"\n=== Generating EDL ===")
-        print(f"Frame rate: {frame_rate} fps")
+        print(f"EDL frame rate: {frame_rate} fps")
 
         # Determine title from output path
         title = Path(output_path).stem
@@ -1070,48 +1070,60 @@ class PitchVideoAssembler:
         # Build a mapping of video paths to their fps for accurate source timecode
         video_fps_map = {}
 
+        # Track timeline position using guide durations
+        timeline_position = 0.0
+
         for match in self.matches:
             match_type = match.get('match_type', 'unknown')
             guide_duration = match.get('guide_duration', 0)
+            source_clips = match.get('source_clips', [])
 
-            if match_type == 'rest' or match_type == 'missing':
+            # Check if this is a rest/missing with no clips assigned
+            if (match_type == 'rest' or match_type == 'missing') and not source_clips:
                 # Black/rest segment
                 comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
                 if match.get('guide_pitch_note'):
                     comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                edl.add_black(guide_duration, comment=", ".join(comment_parts))
-            else:
-                # Video clip
-                source_clips = match.get('source_clips', [])
-                if source_clips:
-                    clip = source_clips[0]
-                    video_path = clip.get('video_path', '')
+                edl.add_black(guide_duration, record_in=timeline_position,
+                              comment=", ".join(comment_parts))
+            elif source_clips:
+                # Video clip (including silence clips for rests)
+                clip = source_clips[0]
+                video_path = clip.get('video_path', '')
 
-                    # Get source video fps (cached)
-                    if video_path not in video_fps_map:
-                        video_fps_map[video_path] = self.get_video_fps(video_path)
-                    source_fps = video_fps_map[video_path]
+                # Get source video fps (cached)
+                if video_path not in video_fps_map:
+                    video_fps_map[video_path] = self.get_video_fps(video_path)
+                source_fps = video_fps_map[video_path]
 
-                    # Calculate source timecode from frames
-                    start_frame = clip.get('video_start_frame', 0)
-                    end_frame = clip.get('video_end_frame', start_frame)
-                    source_in = start_frame / source_fps
-                    source_out = end_frame / source_fps
+                # Calculate source timecode from frames using source video's fps
+                start_frame = clip.get('video_start_frame', 0)
+                end_frame = clip.get('video_end_frame', start_frame)
+                source_in = start_frame / source_fps
+                source_out = end_frame / source_fps
 
-                    # Build comment
-                    comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                    if match.get('guide_pitch_note'):
-                        comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                    transpose = match.get('transpose_semitones', 0)
-                    if transpose != 0:
-                        comment_parts.append(f"Transpose: {transpose:+d} semitones")
+                # Build comment
+                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                if match.get('guide_pitch_note'):
+                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                if match_type == 'rest':
+                    comment_parts.append("(silence clip)")
+                transpose = match.get('transpose_semitones', 0)
+                if transpose != 0:
+                    comment_parts.append(f"Transpose: {transpose:+d} semitones")
 
-                    edl.add_event(
-                        source_path=video_path,
-                        source_in=source_in,
-                        source_out=source_out,
-                        comment=", ".join(comment_parts)
-                    )
+                # Use guide_duration for timeline positioning (record IN/OUT)
+                edl.add_event(
+                    source_path=video_path,
+                    source_in=source_in,
+                    source_out=source_out,
+                    record_in=timeline_position,
+                    record_out=timeline_position + guide_duration,
+                    comment=", ".join(comment_parts)
+                )
+
+            # Advance timeline by guide duration
+            timeline_position += guide_duration
 
         # Write EDL
         edl_path = edl.write(output_path)

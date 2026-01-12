@@ -398,6 +398,25 @@ Instead of extracting pitch from a video, you can use a MIDI file directly:
 - Perfect timing information
 - Works with any melody you can create or export as MIDI
 
+### MIDI Channel Splitter
+
+If you're unsure which MIDI channel contains the melody, use the channel splitter to export each channel as a separate WAV file for listening:
+
+```bash
+# List channels and their note counts
+python src/midi_channel_splitter.py --midi song.mid --list-only
+
+# Export all channels as WAV files
+python src/midi_channel_splitter.py --midi song.mid --output-dir data/temp/midi_channels
+```
+
+This creates one WAV file per channel (e.g., `song_channel_00.wav`, `song_channel_01.wav`). Listen to each file to identify which channel has the vocal/melody track, then use that channel number with `./test_midi_guide.sh`.
+
+**Options:**
+- `--list-only` - Show channel info without exporting
+- `--output-dir PATH` - Output directory (default: `data/temp/midi_channels`)
+- `--sample-rate N` - Audio sample rate (default: 22050)
+
 ### Tips for Best Results
 
 1. **Use hybrid mode** for most vocals - best accuracy with gap filling
