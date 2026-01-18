@@ -601,8 +601,8 @@ def main():
         '--pitch-method',
         type=str,
         default='crepe',
-        choices=['crepe', 'basic-pitch', 'swift-f0', 'hybrid', 'pyin'],
-        help='Pitch detection method (default: crepe). Options: crepe (accurate), basic-pitch (multipitch), swift-f0 (fast CPU), hybrid (crepe+swift-f0), pyin (fallback)'
+        choices=['crepe', 'basic-pitch', 'swift-f0', 'hybrid', 'rmvpe', 'rmvpe-crepe', 'pyin'],
+        help='Pitch detection method (default: crepe). Options: crepe (accurate), basic-pitch (multipitch), swift-f0 (fast CPU), hybrid (crepe+swift-f0), rmvpe (fast vocal), rmvpe-crepe (rmvpe+crepe hybrid), pyin (fallback)'
     )
     parser.add_argument(
         '--use-pyin',

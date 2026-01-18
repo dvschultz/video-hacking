@@ -37,22 +37,32 @@ try:
 except ImportError:
     SWIFT_F0_AVAILABLE = False
 
+try:
+    from rmvpe_detector import RMVPEDetector
+    RMVPE_AVAILABLE = True
+except ImportError:
+    RMVPE_AVAILABLE = False
+
 
 class PitchChangeDetector:
     """Detects pitch changes and syllable boundaries in singing."""
 
-    def __init__(self, audio_path: str, sr: int = 22050, pitch_method: str = 'crepe'):
+    def __init__(self, audio_path: str, sr: int = 22050, pitch_method: str = 'crepe',
+                 device: str = 'auto'):
         """
         Initialize detector.
 
         Args:
             audio_path: Path to audio file
             sr: Sample rate
-            pitch_method: Pitch detection method ('crepe', 'basic-pitch', 'swift-f0', 'hybrid', or 'pyin')
+            pitch_method: Pitch detection method ('crepe', 'basic-pitch', 'swift-f0', 'hybrid',
+                         'rmvpe', 'rmvpe-crepe', or 'pyin')
+            device: Device for neural network models ('auto', 'cuda', 'mps', 'cpu')
         """
         self.audio_path = Path(audio_path)
         self.sr = sr
         self.pitch_method = pitch_method.lower()
+        self.device = device
 
         # Validate pitch method
         if self.pitch_method == 'crepe' and not CREPE_AVAILABLE:
@@ -64,6 +74,19 @@ class PitchChangeDetector:
         elif self.pitch_method == 'swift-f0' and not SWIFT_F0_AVAILABLE:
             print("Warning: SwiftF0 not available, falling back to pYIN")
             self.pitch_method = 'pyin'
+        elif self.pitch_method == 'rmvpe' and not RMVPE_AVAILABLE:
+            print("Warning: RMVPE not available, falling back to pYIN")
+            self.pitch_method = 'pyin'
+        elif self.pitch_method == 'rmvpe-crepe':
+            if not RMVPE_AVAILABLE and not CREPE_AVAILABLE:
+                print("Warning: rmvpe-crepe mode requires RMVPE or CREPE, falling back to pYIN")
+                self.pitch_method = 'pyin'
+            elif not RMVPE_AVAILABLE:
+                print("Warning: RMVPE not available for rmvpe-crepe, using CREPE only")
+                self.pitch_method = 'crepe'
+            elif not CREPE_AVAILABLE:
+                print("Warning: CREPE not available for rmvpe-crepe, using RMVPE only")
+                self.pitch_method = 'rmvpe'
         elif self.pitch_method == 'hybrid':
             if not CREPE_AVAILABLE and not SWIFT_F0_AVAILABLE:
                 print("Warning: Hybrid mode requires CREPE or SwiftF0, falling back to pYIN")
@@ -122,6 +145,16 @@ class PitchChangeDetector:
             # Hybrid: CREPE + SwiftF0 mixture of experts
             print("Using Hybrid (CREPE + SwiftF0 mixture of experts)...")
             times, pitch_hz, confidence = self.extract_pitch_hybrid(frame_time)
+
+        elif self.pitch_method == 'rmvpe':
+            # RMVPE: Robust Model for Vocal Pitch Estimation
+            print("Using RMVPE (fast vocal pitch estimation)...")
+            times, pitch_hz, confidence = self.extract_pitch_rmvpe(frame_time)
+
+        elif self.pitch_method == 'rmvpe-crepe':
+            # Hybrid: RMVPE + CREPE mixture of experts
+            print("Using RMVPE+CREPE hybrid (RMVPE primary + CREPE validation)...")
+            times, pitch_hz, confidence = self.extract_pitch_rmvpe_crepe(frame_time)
 
         else:
             # pYIN: Probabilistic YIN
@@ -406,6 +439,140 @@ class PitchChangeDetector:
         print(f"Hybrid result: {crepe_frames} CREPE frames, {swift_frames} SwiftF0 gap-fills")
 
         return crepe_times, hybrid_pitch, hybrid_conf
+
+    def extract_pitch_rmvpe(self, frame_time: float = 0.01) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Extract continuous pitch using RMVPE (Robust Model for Vocal Pitch Estimation).
+
+        RMVPE is faster than CREPE with good accuracy, especially for singing voice.
+
+        Args:
+            frame_time: Target time between frames (RMVPE uses 10ms frames internally)
+
+        Returns:
+            (times, pitch_hz, confidence) arrays
+        """
+        # Initialize RMVPE detector
+        detector = RMVPEDetector(device=self.device)
+
+        # Detect pitch
+        times, pitch_hz, confidence = detector.detect(self.audio, self.sr)
+
+        return times, pitch_hz, confidence
+
+    def extract_pitch_rmvpe_crepe(self, frame_time: float = 0.01) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Hybrid pitch detection using RMVPE + CREPE mixture of experts.
+
+        Strategy:
+        1. Use RMVPE as primary (faster, good for vocals)
+        2. Use CREPE to validate/fill gaps
+        3. RMVPE gets slight weight boost for vocal content
+
+        Args:
+            frame_time: Target time between frames
+
+        Returns:
+            (times, pitch_hz, confidence) arrays
+        """
+        print("Running RMVPE (primary detector)...")
+
+        # Run RMVPE
+        if not RMVPE_AVAILABLE:
+            print("Warning: RMVPE not available for hybrid mode, using CREPE only")
+            step_size = int(frame_time * 1000)
+            times, pitch_hz, confidence, _ = crepe.predict(
+                self.audio, self.sr, viterbi=True, model_capacity='full', step_size=step_size
+            )
+            return times, pitch_hz, confidence
+
+        rmvpe_detector = RMVPEDetector(device=self.device)
+        rmvpe_times, rmvpe_pitch, rmvpe_conf = rmvpe_detector.detect(self.audio, self.sr)
+
+        print("Running CREPE (validator/gap filler)...")
+
+        # Run CREPE
+        if not CREPE_AVAILABLE:
+            print("Warning: CREPE not available for hybrid mode, using RMVPE only")
+            return rmvpe_times, rmvpe_pitch, rmvpe_conf
+
+        step_size = int(frame_time * 1000)
+        crepe_times, crepe_pitch, crepe_conf, _ = crepe.predict(
+            self.audio, self.sr, viterbi=True, model_capacity='full', step_size=step_size
+        )
+
+        # Interpolate CREPE to match RMVPE's time grid
+        crepe_pitch_interp = np.interp(rmvpe_times, crepe_times, crepe_pitch, left=0, right=0)
+        crepe_conf_interp = np.interp(rmvpe_times, crepe_times, crepe_conf, left=0, right=0)
+
+        # Hybrid fusion logic
+        hybrid_pitch = np.zeros_like(rmvpe_pitch)
+        hybrid_conf = np.zeros_like(rmvpe_conf)
+
+        # Thresholds
+        RMVPE_MIN_CONFIDENCE = 0.3  # RMVPE confidence scale is different
+        CREPE_MIN_CONFIDENCE = 0.5
+        MAX_PITCH_JUMP_SEMITONES = 5
+        BASS_THRESHOLD_HZ = 60
+
+        for i in range(len(rmvpe_times)):
+            rmvpe_has_pitch = rmvpe_pitch[i] > 0 and rmvpe_conf[i] >= RMVPE_MIN_CONFIDENCE
+            crepe_has_pitch = crepe_pitch_interp[i] > 0 and crepe_conf_interp[i] >= CREPE_MIN_CONFIDENCE
+
+            if rmvpe_has_pitch:
+                # RMVPE is confident - use it (slight preference for vocal content)
+                hybrid_pitch[i] = rmvpe_pitch[i]
+                # Boost confidence slightly for RMVPE since it's vocal-optimized
+                hybrid_conf[i] = min(1.0, rmvpe_conf[i] * 1.1)
+
+                # Cross-validate with CREPE if both have pitch
+                if crepe_has_pitch:
+                    # Check if they agree (within 1 semitone)
+                    semitone_diff = abs(12 * np.log2((rmvpe_pitch[i] + 1e-8) / (crepe_pitch_interp[i] + 1e-8)))
+                    if semitone_diff <= 1.0:
+                        # Agreement - boost confidence
+                        hybrid_conf[i] = min(1.0, hybrid_conf[i] + 0.1)
+
+            elif crepe_has_pitch:
+                # RMVPE missed it, use CREPE
+                crepe_freq = crepe_pitch_interp[i]
+
+                # Filter out very low frequencies
+                if crepe_freq < BASS_THRESHOLD_HZ:
+                    continue
+
+                # Check pitch continuity with nearby RMVPE pitches
+                accept_crepe = False
+
+                context_start = max(0, i - 10)
+                context_end = min(len(rmvpe_times), i + 10)
+
+                nearby_rmvpe_pitches = []
+                for j in range(context_start, context_end):
+                    if rmvpe_pitch[j] > 0 and rmvpe_conf[j] >= RMVPE_MIN_CONFIDENCE:
+                        nearby_rmvpe_pitches.append(rmvpe_pitch[j])
+
+                if len(nearby_rmvpe_pitches) > 0:
+                    median_nearby = np.median(nearby_rmvpe_pitches)
+                    semitone_diff = abs(12 * np.log2((crepe_freq + 1e-8) / (median_nearby + 1e-8)))
+                    if semitone_diff <= MAX_PITCH_JUMP_SEMITONES:
+                        accept_crepe = True
+                else:
+                    # No nearby RMVPE context, accept CREPE
+                    accept_crepe = True
+
+                if accept_crepe:
+                    hybrid_pitch[i] = crepe_freq
+                    # Reduce confidence since it's gap-filled
+                    hybrid_conf[i] = crepe_conf_interp[i] * 0.85
+
+        # Count contributions
+        rmvpe_frames = np.sum((hybrid_pitch > 0) & (rmvpe_pitch > 0))
+        crepe_frames = np.sum((hybrid_pitch > 0) & (rmvpe_pitch == 0))
+
+        print(f"RMVPE+CREPE hybrid: {rmvpe_frames} RMVPE frames, {crepe_frames} CREPE gap-fills")
+
+        return rmvpe_times, hybrid_pitch, hybrid_conf
 
     def detect_pitch_segments(self,
                              min_confidence: float = 0.5,

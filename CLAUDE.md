@@ -35,7 +35,8 @@ pip install -r requirements.txt      # Install dependencies
 ### Pitch Matching Pipeline
 ```bash
 # Step 1a: Analyze guide video pitch sequence
-./test_pitch_guide.sh <guide_video.mp4> [--pitch-method hybrid] [--pitch-smoothing 5]
+# --pitch-method: crepe, rmvpe (fast), rmvpe-crepe, hybrid, swift-f0, basic-pitch, pyin
+./test_pitch_guide.sh <guide_video.mp4> [--pitch-method rmvpe] [--pitch-smoothing 5]
 
 # Step 1b: OR use MIDI file as guide (alternative to video)
 ./test_midi_guide.sh <melody.mid> <channel> [--min-rest 0.1] [--list-channels]
@@ -97,7 +98,14 @@ python src/semantic_matcher.py --audio-embeddings <audio.json> --video-embedding
 - Key params: `--fps` (frame rate), `--power` (compression), `--threshold` (cut points)
 
 **Pitch Detection** (`src/pitch_guide_analyzer.py`, `src/pitch_source_analyzer.py`, `src/pitch_change_detector.py`):
-- Uses CREPE (default), SwiftF0, Basic Pitch, or hybrid mixture-of-experts
+- Multiple pitch detection methods available via `--pitch-method`:
+  - `crepe` (default): Deep learning, most accurate, requires TensorFlow
+  - `rmvpe`: Fast vocal pitch estimation, auto-downloads model on first use (~180MB)
+  - `rmvpe-crepe`: Hybrid combining RMVPE (primary) + CREPE (validation/gap-filling)
+  - `hybrid`: CREPE + SwiftF0 mixture-of-experts
+  - `swift-f0`: Fast CPU-optimized detection
+  - `basic-pitch`: Spotify's multipitch detection
+  - `pyin`: Librosa's probabilistic YIN (fallback)
 - `PitchChangeDetector` segments audio on pitch changes + silence
 - Output: JSON with pitch sequences indexed by MIDI note number
 
