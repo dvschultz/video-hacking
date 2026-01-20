@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from edl_generator import EDLGenerator
 import video_utils
 
 
@@ -89,14 +88,6 @@ class DurationVideoAssembler:
         print(f"  Rest segments (black frames): {rest_count}")
         print(f"  Total output duration: {stats['total_output_duration']:.1f}s")
 
-    def get_video_resolution(self, video_path: str) -> Tuple[int, int]:
-        """Get video resolution using ffprobe (cached via lru_cache)."""
-        return video_utils.get_video_resolution(video_path)
-
-    def get_video_fps(self, video_path: str) -> float:
-        """Get video frame rate using ffprobe (cached via lru_cache)."""
-        return video_utils.get_video_fps(video_path)
-
     def analyze_source_videos(self) -> Dict:
         """Analyze all unique source videos to find resolutions and frame rates."""
         print("\nAnalyzing source videos...")
@@ -111,8 +102,8 @@ class DurationVideoAssembler:
         fps_values = []
 
         for video_path in video_paths:
-            width, height = self.get_video_resolution(video_path)
-            fps = self.get_video_fps(video_path)
+            width, height = video_utils.get_video_resolution(video_path)
+            fps = video_utils.get_video_fps(video_path)
             resolutions.append((width, height))
             fps_values.append(fps)
             print(f"  {Path(video_path).name}: {width}x{height} @ {fps:.2f}fps")
@@ -134,30 +125,6 @@ class DurationVideoAssembler:
             'unique_resolutions': list(set(resolutions)),
             'unique_fps': list(set(fps_values))
         }
-
-    def prompt_for_resolution(self, analysis: Dict) -> Tuple[int, int]:
-        """
-        Prompt user to select output resolution.
-
-        Args:
-            analysis: Resolution analysis from analyze_source_videos()
-
-        Returns:
-            Tuple of (width, height) selected by user
-        """
-        return video_utils.prompt_for_resolution(analysis)
-
-    def prompt_for_fps(self, analysis: Dict) -> float:
-        """
-        Prompt user to select output frame rate.
-
-        Args:
-            analysis: Analysis from analyze_source_videos()
-
-        Returns:
-            Frame rate selected by user
-        """
-        return video_utils.prompt_for_fps(analysis)
 
     def extract_clip(self, video_path: str, start_frame: int, fps: float,
                      target_duration: float, output_path: str):
@@ -236,16 +203,22 @@ class DurationVideoAssembler:
 
         elif match_type == 'duration':
             # Extract cropped clip
+            is_rest = match.get('is_rest', False)
             for clip_idx, source_clip in enumerate(match.get('source_clips', [])):
                 video_path = source_clip['video_path']
                 start_frame = source_clip['video_start_frame']
                 # Use the exact target duration from guide, not calculated from frames
                 target_duration = source_clip.get('duration', match['guide_duration'])
 
-                fps = self.get_video_fps(video_path)
+                fps = video_utils.get_video_fps(video_path)
                 output_path = self.temp_dir / f"match_{match_idx:04d}_clip_{clip_idx:02d}.mp4"
 
-                self.extract_clip(video_path, start_frame, fps, target_duration, str(output_path))
+                if is_rest:
+                    # For matched rest segments, replace audio with true silence
+                    start_time = start_frame / fps
+                    video_utils.extract_clip_with_silence(video_path, str(output_path), start_time, target_duration)
+                else:
+                    self.extract_clip(video_path, start_frame, fps, target_duration, str(output_path))
                 clips.append(str(output_path))
 
         elif match_type == 'unmatched':
@@ -261,10 +234,6 @@ class DurationVideoAssembler:
             clips.append(str(output_path))
 
         return clips
-
-    def is_valid_clip(self, clip_path: str) -> bool:
-        """Check if a clip file is valid and has non-zero duration."""
-        return video_utils.is_valid_clip(clip_path)
 
     def _normalize_single_clip(self, args: Tuple) -> Tuple[int, Optional[str], Optional[str]]:
         """Normalize a single clip (for parallel processing)."""
@@ -295,7 +264,7 @@ class DurationVideoAssembler:
         valid_clips = []
         skipped_count = 0
         for i, clip_file in enumerate(clip_files):
-            if self.is_valid_clip(clip_file):
+            if video_utils.is_valid_clip(clip_file):
                 valid_clips.append((i, clip_file))
             else:
                 print(f"  Warning: Skipping invalid clip {i}: {Path(clip_file).name}")
@@ -409,14 +378,14 @@ class DurationVideoAssembler:
                     self.target_height = analysis['min_height']
                     print(f"\nUsing resolution: {self.target_width}x{self.target_height}")
                 else:
-                    self.target_width, self.target_height = self.prompt_for_resolution(analysis)
+                    self.target_width, self.target_height = video_utils.prompt_for_resolution(analysis)
 
             if need_fps:
                 if skip_fps_prompt:
                     self.target_fps = analysis['min_fps']
                     print(f"Using frame rate: {self.target_fps:.2f} fps")
                 else:
-                    self.target_fps = self.prompt_for_fps(analysis)
+                    self.target_fps = video_utils.prompt_for_fps(analysis)
 
         # Process all matches
         all_clips = []
@@ -451,79 +420,30 @@ class DurationVideoAssembler:
         Returns:
             Path to generated EDL file
         """
+        from edl_generator import generate_edl_from_matches
+
         if frame_rate is None:
             frame_rate = self.target_fps or 24.0
 
         print(f"\n=== Generating EDL ===")
         print(f"EDL frame rate: {frame_rate} fps")
 
-        # Determine title from output path
-        title = Path(output_path).stem
-
-        edl = EDLGenerator(title, frame_rate=frame_rate)
-
-        # Build a mapping of video paths to their fps for accurate source timecode
+        # Build video fps mapping for accurate source timecodes
         video_fps_map = {}
-
-        # Track timeline position using guide durations
-        timeline_position = 0.0
-
         for match in self.matches:
-            match_type = match.get('match_type', 'unknown')
-            guide_duration = match.get('guide_duration', 0)
-            source_clips = match.get('source_clips', [])
-
-            # Check if this is a rest/unmatched with no clips assigned
-            if (match_type == 'rest' or match_type == 'unmatched') and not source_clips:
-                # Black/rest segment
-                comment = f"Guide segment {match.get('guide_segment_id', '?')}"
-                if match.get('is_rest'):
-                    comment += " (REST)"
-                edl.add_black(guide_duration, record_in=timeline_position, comment=comment)
-            elif source_clips:
-                # Video clip (including matched rests with --match-rests)
-                clip = source_clips[0]
+            for clip in match.get('source_clips', []):
                 video_path = clip.get('video_path', '')
+                if video_path and video_path not in video_fps_map:
+                    video_fps_map[video_path] = video_utils.get_video_fps(video_path)
 
-                # Get source video fps (cached)
-                if video_path not in video_fps_map:
-                    video_fps_map[video_path] = self.get_video_fps(video_path)
-                source_fps = video_fps_map[video_path]
-
-                # Calculate source timecode from frames using source video's fps
-                start_frame = clip.get('video_start_frame', 0)
-                clip_duration = clip.get('duration', guide_duration)
-                source_in = start_frame / source_fps
-                source_out = source_in + clip_duration
-
-                # Build comment
-                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                if match_type == 'rest':
-                    comment_parts.append("(matched rest)")
-                crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
-                if crop_mode:
-                    comment_parts.append(f"Crop: {crop_mode}")
-
-                # Use guide_duration for timeline positioning (record IN/OUT)
-                edl.add_event(
-                    source_path=video_path,
-                    source_in=source_in,
-                    source_out=source_out,
-                    record_in=timeline_position,
-                    record_out=timeline_position + guide_duration,
-                    comment=", ".join(comment_parts)
-                )
-
-            # Advance timeline by guide duration
-            timeline_position += guide_duration
-
-        # Write EDL
-        edl_path = edl.write(output_path)
-        print(f"EDL saved to: {edl_path}")
-        print(f"  Events: {edl.event_count}")
-        print(f"  Total duration: {edl.total_duration:.2f}s")
-
-        return edl_path
+        return generate_edl_from_matches(
+            matches=self.matches,
+            output_path=output_path,
+            title=Path(output_path).stem,
+            frame_rate=frame_rate,
+            video_fps_map=video_fps_map,
+            verbose=True
+        )
 
     def cleanup(self):
         """Clean up temporary files."""

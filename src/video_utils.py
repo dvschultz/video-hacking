@@ -382,6 +382,52 @@ def generate_black_clip(
         raise
 
 
+def extract_clip_with_silence(
+    video_path: str,
+    output_path: str,
+    start_time: float,
+    duration: float
+) -> None:
+    """
+    Extract video clip with audio replaced by silence.
+
+    Uses FFmpeg's anullsrc filter to generate true silence instead of
+    preserving potentially noisy audio from the source clip.
+
+    Args:
+        video_path: Path to source video file
+        output_path: Path for output clip
+        start_time: Start time in seconds
+        duration: Duration in seconds
+
+    Raises:
+        ValueError: If duration is invalid (non-positive)
+        subprocess.CalledProcessError: If FFmpeg fails
+    """
+    if duration <= 0:
+        raise ValueError(f"Invalid duration: {duration}")
+
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(video_path),
+        '-ss', f'{start_time:.6f}',
+        '-t', f'{duration:.6f}',
+        '-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}',
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+        '-c:a', 'aac', '-ar', '44100', '-b:a', '320k',
+        str(output_path)
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    except subprocess.CalledProcessError as e:
+        print(f"Error extracting clip with silence: {e}")
+        if e.stderr:
+            print(f"stderr: {e.stderr.decode()[:200]}")
+        raise
+
+
 def clear_caches() -> None:
     """Clear all video metadata caches."""
     get_video_resolution.cache_clear()

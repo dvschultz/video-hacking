@@ -27,7 +27,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from edl_generator import EDLGenerator
 import video_utils
 
 
@@ -90,30 +89,6 @@ class PitchVideoAssembler:
         if 'rest_segments' in stats:
             print(f"  Rest segments: {stats['rest_segments']}")
 
-    def get_video_resolution(self, video_path: str) -> Tuple[int, int]:
-        """
-        Get video resolution using ffprobe (cached via lru_cache).
-
-        Args:
-            video_path: Path to video file
-
-        Returns:
-            Tuple of (width, height)
-        """
-        return video_utils.get_video_resolution(video_path)
-
-    def get_video_fps(self, video_path: str) -> float:
-        """
-        Get video frame rate using ffprobe (cached via lru_cache).
-
-        Args:
-            video_path: Path to video file
-
-        Returns:
-            Frame rate as float
-        """
-        return video_utils.get_video_fps(video_path)
-
     def analyze_source_videos(self) -> Dict:
         """
         Analyze all unique source videos to find their resolutions and frame rates.
@@ -136,8 +111,8 @@ class PitchVideoAssembler:
         resolutions = {}
         framerates = {}
         for video_path in video_paths:
-            width, height = self.get_video_resolution(video_path)
-            fps = self.get_video_fps(video_path)
+            width, height = video_utils.get_video_resolution(video_path)
+            fps = video_utils.get_video_fps(video_path)
             resolutions[video_path] = (width, height)
             framerates[video_path] = fps
 
@@ -175,30 +150,6 @@ class PitchVideoAssembler:
             print(f"    {fps:.2f} fps: {count} video(s)")
 
         return analysis
-
-    def prompt_for_resolution(self, analysis: Dict) -> Tuple[int, int]:
-        """
-        Prompt user to select output resolution.
-
-        Args:
-            analysis: Resolution analysis from analyze_source_resolutions()
-
-        Returns:
-            Tuple of (width, height) selected by user
-        """
-        return video_utils.prompt_for_resolution(analysis)
-
-    def prompt_for_fps(self, analysis: Dict) -> float:
-        """
-        Prompt user to select output frame rate.
-
-        Args:
-            analysis: Analysis from analyze_source_videos()
-
-        Returns:
-            Frame rate selected by user
-        """
-        return video_utils.prompt_for_fps(analysis)
 
     def extract_video_clip(self, video_path: str, start_frame: int, end_frame: int,
                           fps: float, output_path: str):
@@ -438,7 +389,7 @@ class PitchVideoAssembler:
             end_frame = int(clip['video_end_frame'])
 
             # Get fps for duration calculation
-            fps = self.get_video_fps(video_path)
+            fps = video_utils.get_video_fps(video_path)
             clip_duration = (end_frame - start_frame) / fps
 
             if clip_duration < min_duration:
@@ -484,7 +435,7 @@ class PitchVideoAssembler:
                 if last['video_path'] == pending_short['video_path']:
                     # Use max to avoid shrinking if pending is from looped segment
                     last['video_end_frame'] = max(int(last['video_end_frame']), int(pending_short['video_end_frame']))
-                    fps = self.get_video_fps(last['video_path'])
+                    fps = video_utils.get_video_fps(last['video_path'])
                     last['duration'] = (last['video_end_frame'] - last['video_start_frame']) / fps
                     print(f"    Merged trailing short clip into previous clip")
                 else:
@@ -542,7 +493,7 @@ class PitchVideoAssembler:
                     end_frame = int(clip['video_end_frame'])
 
                     # Get actual fps from source video
-                    fps = self.get_video_fps(video_path)
+                    fps = video_utils.get_video_fps(video_path)
 
                     # Validate clip duration
                     clip_duration = (end_frame - start_frame) / fps
@@ -550,9 +501,10 @@ class PitchVideoAssembler:
                         print(f"    WARNING: Silence clip {clip_idx} has invalid duration: {clip_duration:.3f}s")
                         continue
 
-                    # Extract silence clip (video with original silent audio)
+                    # Extract silence clip (video with true silence replacing original audio)
                     temp_clip = self.temp_dir / f"match_{match_idx:04d}_rest_{clip_idx:02d}.mp4"
-                    self.extract_clip_with_audio(video_path, start_frame, end_frame, fps, str(temp_clip))
+                    start_time = start_frame / fps
+                    video_utils.extract_clip_with_silence(video_path, str(temp_clip), start_time, clip_duration)
                     clip_files.append(str(temp_clip))
 
                 if clip_files:
@@ -603,7 +555,7 @@ class PitchVideoAssembler:
             end_frame = int(clip['video_end_frame'])
 
             # Get actual fps from source video (uses class-level cache)
-            fps = self.get_video_fps(video_path)
+            fps = video_utils.get_video_fps(video_path)
 
             # Calculate duration and validate
             clip_duration = (end_frame - start_frame) / fps
@@ -632,18 +584,6 @@ class PitchVideoAssembler:
             temp_audio.unlink()
 
         return clip_files
-
-    def is_valid_clip(self, clip_path: str) -> bool:
-        """
-        Check if a clip file is valid (has video stream and non-zero duration).
-
-        Args:
-            clip_path: Path to clip file
-
-        Returns:
-            True if clip is valid, False otherwise
-        """
-        return video_utils.is_valid_clip(clip_path)
 
     def _normalize_single_clip(self, args: Tuple[int, str, int, int, float, Path]) -> Tuple[int, Optional[str], Optional[str]]:
         """
@@ -689,7 +629,7 @@ class PitchVideoAssembler:
         valid_clips = []
         skipped_count = 0
         for i, clip_file in enumerate(clip_files):
-            if self.is_valid_clip(clip_file):
+            if video_utils.is_valid_clip(clip_file):
                 valid_clips.append((i, clip_file))
             else:
                 print(f"  Warning: Skipping invalid/empty clip {i}: {Path(clip_file).name}")
@@ -806,7 +746,7 @@ class PitchVideoAssembler:
                     print(f"\nUsing smallest resolution: {self.target_width}x{self.target_height}")
                 else:
                     # Prompt user for resolution
-                    self.target_width, self.target_height = self.prompt_for_resolution(analysis)
+                    self.target_width, self.target_height = video_utils.prompt_for_resolution(analysis)
 
             # Determine output frame rate
             if need_fps:
@@ -816,7 +756,7 @@ class PitchVideoAssembler:
                     print(f"\nUsing smallest frame rate: {self.target_fps:.2f} fps")
                 else:
                     # Prompt user for fps
-                    self.target_fps = self.prompt_for_fps(analysis)
+                    self.target_fps = video_utils.prompt_for_fps(analysis)
 
         all_clips = []
         total_matches = len(self.matches)
@@ -850,82 +790,30 @@ class PitchVideoAssembler:
         Returns:
             Path to generated EDL file
         """
+        from edl_generator import generate_edl_from_matches
+
         if frame_rate is None:
             frame_rate = self.target_fps or 24.0
 
         print(f"\n=== Generating EDL ===")
         print(f"EDL frame rate: {frame_rate} fps")
 
-        # Determine title from output path
-        title = Path(output_path).stem
-
-        edl = EDLGenerator(title, frame_rate=frame_rate)
-
-        # Build a mapping of video paths to their fps for accurate source timecode
+        # Build video fps mapping for accurate source timecodes
         video_fps_map = {}
-
-        # Track timeline position using guide durations
-        timeline_position = 0.0
-
         for match in self.matches:
-            match_type = match.get('match_type', 'unknown')
-            guide_duration = match.get('guide_duration', 0)
-            source_clips = match.get('source_clips', [])
-
-            # Check if this is a rest/missing with no clips assigned
-            if (match_type == 'rest' or match_type == 'missing') and not source_clips:
-                # Black/rest segment
-                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                if match.get('guide_pitch_note'):
-                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                edl.add_black(guide_duration, record_in=timeline_position,
-                              comment=", ".join(comment_parts))
-            elif source_clips:
-                # Video clip (including silence clips for rests)
-                clip = source_clips[0]
+            for clip in match.get('source_clips', []):
                 video_path = clip.get('video_path', '')
+                if video_path and video_path not in video_fps_map:
+                    video_fps_map[video_path] = video_utils.get_video_fps(video_path)
 
-                # Get source video fps (cached)
-                if video_path not in video_fps_map:
-                    video_fps_map[video_path] = self.get_video_fps(video_path)
-                source_fps = video_fps_map[video_path]
-
-                # Calculate source timecode from frames using source video's fps
-                start_frame = clip.get('video_start_frame', 0)
-                end_frame = clip.get('video_end_frame', start_frame)
-                source_in = start_frame / source_fps
-                source_out = end_frame / source_fps
-
-                # Build comment
-                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                if match.get('guide_pitch_note'):
-                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                if match_type == 'rest':
-                    comment_parts.append("(silence clip)")
-                transpose = match.get('transpose_semitones', 0)
-                if transpose != 0:
-                    comment_parts.append(f"Transpose: {transpose:+d} semitones")
-
-                # Use guide_duration for timeline positioning (record IN/OUT)
-                edl.add_event(
-                    source_path=video_path,
-                    source_in=source_in,
-                    source_out=source_out,
-                    record_in=timeline_position,
-                    record_out=timeline_position + guide_duration,
-                    comment=", ".join(comment_parts)
-                )
-
-            # Advance timeline by guide duration
-            timeline_position += guide_duration
-
-        # Write EDL
-        edl_path = edl.write(output_path)
-        print(f"EDL saved to: {edl_path}")
-        print(f"  Events: {edl.event_count}")
-        print(f"  Total duration: {edl.total_duration:.2f}s")
-
-        return edl_path
+        return generate_edl_from_matches(
+            matches=self.matches,
+            output_path=output_path,
+            title=Path(output_path).stem,
+            frame_rate=frame_rate,
+            video_fps_map=video_fps_map,
+            verbose=True
+        )
 
     def cleanup(self):
         """Clean up temporary files."""
