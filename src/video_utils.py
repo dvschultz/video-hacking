@@ -6,8 +6,10 @@ This module provides common video operations used by both
 duration_video_assembler.py and pitch_video_assembler.py.
 """
 
+import json
 import os
 import platform
+import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -409,11 +411,11 @@ def extract_clip_with_silence(
 
     cmd = [
         'ffmpeg', '-y',
+        '-ss', f'{start_time:.6f}',  # Seek before input for fast seeking
         '-i', str(video_path),
-        '-ss', f'{start_time:.6f}',
-        '-t', f'{duration:.6f}',
         '-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}',
         '-map', '0:v:0', '-map', '1:a:0',
+        '-t', f'{duration:.6f}',  # Duration after all inputs
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
         '-c:a', 'aac', '-ar', '44100', '-b:a', '320k',
         str(output_path)
@@ -426,6 +428,171 @@ def extract_clip_with_silence(
         if e.stderr:
             print(f"stderr: {e.stderr.decode()[:200]}")
         raise
+
+
+def measure_loudness(audio_path: str, target_lufs: float = -16.0) -> Optional[Dict]:
+    """
+    FFmpeg pass 1 - measure audio loudness for EBU R128 normalization.
+
+    Args:
+        audio_path: Path to audio or video file
+        target_lufs: Target integrated loudness in LUFS (for filter setup)
+
+    Returns:
+        Dictionary with measured values (input_i, input_tp, input_lra, input_thresh)
+        or None if measurement fails
+    """
+    cmd = [
+        'ffmpeg', '-y', '-i', str(audio_path),
+        '-af', f'loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json',
+        '-f', 'null', '-'
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
+        # FFmpeg outputs loudnorm JSON to stderr
+        stderr = result.stderr
+
+        # Find JSON block in output (between { and })
+        json_match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', stderr, re.DOTALL)
+        if not json_match:
+            return None
+
+        loudness_data = json.loads(json_match.group())
+
+        # Validate required fields
+        required = ['input_i', 'input_tp', 'input_lra', 'input_thresh']
+        if not all(k in loudness_data for k in required):
+            return None
+
+        return loudness_data
+
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"Warning: Could not measure loudness for {audio_path}: {e}")
+        return None
+
+
+def apply_loudnorm(
+    input_path: str,
+    output_path: str,
+    measured: Dict,
+    target_lufs: float = -16.0
+) -> bool:
+    """
+    FFmpeg pass 2 - apply loudness normalization with measured values.
+
+    Uses linear=true for higher quality (no dynamic range compression).
+
+    Args:
+        input_path: Path to input audio/video file
+        output_path: Path for normalized output (WAV format)
+        measured: Dictionary from measure_loudness() with input_i, input_tp, etc.
+        target_lufs: Target integrated loudness in LUFS
+
+    Returns:
+        True if successful, False otherwise
+    """
+    af_filter = (
+        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:"
+        f"measured_I={measured['input_i']}:"
+        f"measured_TP={measured['input_tp']}:"
+        f"measured_LRA={measured['input_lra']}:"
+        f"measured_thresh={measured['input_thresh']}:"
+        f"linear=true"
+    )
+
+    cmd = [
+        'ffmpeg', '-y', '-i', str(input_path),
+        '-af', af_filter,
+        '-ar', '44100',
+        '-ac', '1',  # Mono (will be re-encoded later)
+        str(output_path)
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Could not apply loudnorm to {input_path}: {e}")
+        if e.stderr:
+            print(f"  {e.stderr.decode()[:200]}")
+        return False
+
+
+def normalize_audio_file(
+    input_path: str,
+    output_path: str,
+    target_lufs: float = -16.0,
+    min_duration: float = 0.5,
+    silent_threshold: float = -50.0
+) -> bool:
+    """
+    Complete two-pass EBU R128 loudness normalization.
+
+    This is a convenience wrapper that runs both measurement and application passes.
+    Handles edge cases like silent or very short clips.
+
+    Args:
+        input_path: Path to input audio file
+        output_path: Path for normalized output
+        target_lufs: Target integrated loudness in LUFS (default: -16.0)
+        min_duration: Minimum duration for two-pass; shorter clips use single-pass
+        silent_threshold: Clips quieter than this (LUFS) are skipped
+
+    Returns:
+        True if normalization was successful, False otherwise
+    """
+    # Get duration to handle very short clips
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'csv=p=0',
+        str(input_path)
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+        duration = float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        duration = 1.0  # Assume reasonable duration on error
+
+    # For very short clips, use single-pass (less accurate but works)
+    if duration < min_duration:
+        af_filter = f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11"
+        cmd = [
+            'ffmpeg', '-y', '-i', str(input_path),
+            '-af', af_filter,
+            '-ar', '44100',
+            '-ac', '1',
+            str(output_path)
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    # Pass 1: Measure loudness
+    measured = measure_loudness(input_path, target_lufs)
+    if measured is None:
+        return False
+
+    # Check if audio is essentially silent
+    try:
+        input_i = float(measured['input_i'])
+        if input_i < silent_threshold:
+            # Audio is too quiet, skip normalization (would just amplify noise)
+            # Just copy the file instead
+            import shutil
+            shutil.copy(input_path, output_path)
+            return True
+    except (ValueError, KeyError):
+        pass
+
+    # Pass 2: Apply normalization
+    return apply_loudnorm(input_path, output_path, measured, target_lufs)
 
 
 def clear_caches() -> None:

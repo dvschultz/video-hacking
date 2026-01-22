@@ -24,6 +24,8 @@ if [ $# -lt 1 ]; then
     echo "  --auto-fps          Use smallest source fps"
     echo "  --parallel N        Parallel workers (default: auto)"
     echo "  --no-audio          Output video only"
+    echo "  --normalize-audio   Apply EBU R128 loudness normalization to each clip"
+    echo "  --target-lufs N     Target loudness in LUFS for normalization (default: -16.0)"
     echo "  --no-cleanup        Keep temp files"
     echo "  --edl               Generate EDL file alongside video"
     echo "  --edl-only          Generate EDL file only (skip video assembly)"

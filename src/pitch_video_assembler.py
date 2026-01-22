@@ -35,7 +35,8 @@ class PitchVideoAssembler:
 
     def __init__(self, match_plan_path: str, output_path: str, temp_dir: str = "data/temp",
                  target_width: int = None, target_height: int = None, target_fps: int = 24,
-                 parallel_workers: int = None, use_true_silence: bool = False):
+                 parallel_workers: int = None, use_true_silence: bool = False,
+                 normalize_audio: bool = False, target_lufs: float = -16.0):
         """
         Initialize the assembler.
 
@@ -49,6 +50,8 @@ class PitchVideoAssembler:
             parallel_workers: Number of parallel workers for normalization (None = auto)
             use_true_silence: If True, use black frames with muted audio for rests
                               instead of source "silence" clips (default: False)
+            normalize_audio: If True, apply EBU R128 loudness normalization per-clip
+            target_lufs: Target loudness in LUFS for normalization (default: -16.0)
         """
         self.match_plan_path = Path(match_plan_path)
         self.output_path = Path(output_path)
@@ -62,6 +65,10 @@ class PitchVideoAssembler:
 
         # Silence handling
         self.use_true_silence = use_true_silence
+
+        # Audio normalization (EBU R128)
+        self.normalize_audio = normalize_audio
+        self.target_lufs = target_lufs
 
         # Parallel processing (default to CPU count, max 8 to avoid I/O saturation)
         if parallel_workers is None:
@@ -308,6 +315,15 @@ class PitchVideoAssembler:
             print(f"Error extracting audio: {e}")
             print(f"stderr: {e.stderr.decode()}")
             raise
+
+        # Apply loudness normalization if enabled
+        if self.normalize_audio:
+            normalized_audio = self.temp_dir / f"normalized_{Path(output_path).stem}.wav"
+            if video_utils.normalize_audio_file(str(temp_audio), str(normalized_audio), self.target_lufs):
+                temp_audio.unlink()
+                temp_audio = normalized_audio
+            else:
+                print(f"    Warning: Loudness normalization failed, using original audio")
 
         # Load audio
         audio, sr = librosa.load(str(temp_audio), sr=sample_rate)
@@ -906,6 +922,17 @@ def main():
         default=None,
         help='Custom EDL output path (default: same as video with .edl extension)'
     )
+    parser.add_argument(
+        '--normalize-audio',
+        action='store_true',
+        help='Apply EBU R128 loudness normalization to each clip'
+    )
+    parser.add_argument(
+        '--target-lufs',
+        type=float,
+        default=-16.0,
+        help='Target loudness in LUFS for normalization (default: -16.0)'
+    )
 
     args = parser.parse_args()
 
@@ -928,6 +955,8 @@ def main():
     target_fps = args.fps
     if target_fps:
         print(f"Frame rate: {target_fps} fps")
+    if args.normalize_audio:
+        print(f"Audio normalization: enabled (target: {args.target_lufs} LUFS)")
 
     # Create output directory
     output_path = Path(args.output)
@@ -948,7 +977,9 @@ def main():
         target_height=target_height,
         target_fps=target_fps,
         parallel_workers=args.parallel,
-        use_true_silence=args.true_silence
+        use_true_silence=args.true_silence,
+        normalize_audio=args.normalize_audio,
+        target_lufs=args.target_lufs
     )
 
     # Load match plan

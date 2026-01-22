@@ -12,8 +12,8 @@ NC='\033[0m' # No Color
 
 echo -e "${BLUE}=== Pitch Video Assembler ===${NC}\n"
 
-# Check arguments
-if [ $# -lt 1 ]; then
+# Function to show help
+show_help() {
     echo "Usage: $0 <match_plan.json> [options]"
     echo ""
     echo "Options:"
@@ -25,10 +25,13 @@ if [ $# -lt 1 ]; then
     echo "  --auto-fps          Use smallest source frame rate automatically (no prompt)"
     echo "  --parallel N        Number of parallel workers for normalization (default: auto, max 8)"
     echo "  --true-silence      Use black frames + muted audio for rests (instead of source silence clips)"
+    echo "  --normalize-audio   Apply EBU R128 loudness normalization to each clip"
+    echo "  --target-lufs N     Target loudness in LUFS for normalization (default: -16.0)"
     echo "  --no-cleanup        Keep temporary files for debugging"
     echo "  --edl               Generate EDL file alongside video"
     echo "  --edl-only          Generate EDL file only (skip video assembly)"
     echo "  --edl-output PATH   Custom EDL output path"
+    echo "  -h, --help          Show this help message"
     echo ""
     echo "Examples:"
     echo "  # Basic usage (will prompt for resolution and fps):"
@@ -45,6 +48,17 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "  # Generate EDL for NLE import:"
     echo "  $0 data/segments/match_plan.json --edl-only --fps 24"
+}
+
+# Check for help flag
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_help
+    exit 0
+fi
+
+# Check arguments
+if [ $# -lt 1 ]; then
+    show_help
     exit 1
 fi
 

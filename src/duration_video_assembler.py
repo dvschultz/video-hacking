@@ -32,7 +32,8 @@ class DurationVideoAssembler:
 
     def __init__(self, match_plan_path: str, output_path: str, temp_dir: str = "data/temp",
                  target_width: int = None, target_height: int = None, target_fps: float = None,
-                 parallel_workers: int = None, keep_audio: bool = True):
+                 parallel_workers: int = None, keep_audio: bool = True,
+                 normalize_audio: bool = False, target_lufs: float = -16.0):
         """
         Initialize the assembler.
 
@@ -45,6 +46,8 @@ class DurationVideoAssembler:
             target_fps: Target frame rate (None = auto-detect)
             parallel_workers: Number of parallel workers for normalization (None = auto)
             keep_audio: If True, preserve original audio from clips
+            normalize_audio: If True, apply EBU R128 loudness normalization per-clip
+            target_lufs: Target loudness in LUFS for normalization (default: -16.0)
         """
         self.match_plan_path = Path(match_plan_path)
         self.output_path = Path(output_path)
@@ -58,6 +61,10 @@ class DurationVideoAssembler:
 
         # Audio handling
         self.keep_audio = keep_audio
+
+        # Audio normalization (EBU R128)
+        self.normalize_audio = normalize_audio
+        self.target_lufs = target_lufs
 
         # Parallel processing (default to CPU count, max 8 to avoid I/O saturation)
         if parallel_workers is None:
@@ -169,6 +176,72 @@ class DurationVideoAssembler:
             if e.stderr:
                 print(f"stderr: {e.stderr.decode()[:200]}")
             raise
+
+        # Apply audio normalization if enabled
+        if self.keep_audio and self.normalize_audio:
+            self._normalize_clip_audio(output_path)
+
+    def _normalize_clip_audio(self, clip_path: str) -> bool:
+        """
+        Normalize audio in a video clip using EBU R128 two-pass.
+
+        Extracts audio, normalizes it, and remuxes with video.
+
+        Args:
+            clip_path: Path to video clip with audio
+
+        Returns:
+            True if successful, False otherwise
+        """
+        clip_path = Path(clip_path)
+        temp_audio = self.temp_dir / f"temp_audio_{clip_path.stem}.wav"
+        normalized_audio = self.temp_dir / f"norm_audio_{clip_path.stem}.wav"
+        temp_video = self.temp_dir / f"temp_video_{clip_path.stem}.mp4"
+
+        try:
+            # Extract audio
+            cmd = [
+                'ffmpeg', '-y', '-i', str(clip_path),
+                '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
+                str(temp_audio)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+            # Normalize audio
+            if not video_utils.normalize_audio_file(str(temp_audio), str(normalized_audio), self.target_lufs):
+                temp_audio.unlink(missing_ok=True)
+                return False
+
+            # Extract video only
+            cmd = [
+                'ffmpeg', '-y', '-i', str(clip_path),
+                '-an', '-c:v', 'copy',
+                str(temp_video)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+            # Remux with normalized audio
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(temp_video),
+                '-i', str(normalized_audio),
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-ar', '44100', '-b:a', '320k',
+                '-map', '0:v:0', '-map', '1:a:0',
+                str(clip_path)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+            return True
+
+        except subprocess.CalledProcessError:
+            return False
+
+        finally:
+            # Cleanup temp files
+            temp_audio.unlink(missing_ok=True)
+            normalized_audio.unlink(missing_ok=True)
+            temp_video.unlink(missing_ok=True)
 
     def generate_rest_clip(self, duration: float, output_path: str,
                            width: int = 1920, height: int = 1080, fps: float = 24):
@@ -498,6 +571,10 @@ Examples:
                         help='Generate EDL file only, skip video assembly')
     parser.add_argument('--edl-output', type=str,
                         help='Custom EDL output path (default: same as video with .edl extension)')
+    parser.add_argument('--normalize-audio', action='store_true',
+                        help='Apply EBU R128 loudness normalization to each clip')
+    parser.add_argument('--target-lufs', type=float, default=-16.0,
+                        help='Target loudness in LUFS for normalization (default: -16.0)')
 
     args = parser.parse_args()
 
@@ -536,7 +613,9 @@ Examples:
         target_height=target_height,
         target_fps=args.fps,
         parallel_workers=args.parallel,
-        keep_audio=not args.no_audio
+        keep_audio=not args.no_audio,
+        normalize_audio=args.normalize_audio,
+        target_lufs=args.target_lufs
     )
 
     assembler.load_match_plan()
