@@ -26,6 +26,8 @@ if [ $# -lt 2 ]; then
     echo "  --duration-weight N     Weight for duration matching (default: 0.3)"
     echo "  --confidence-weight N   Weight for pitch confidence matching (default: 0.4)"
     echo "  --consistency-weight N  Weight for loopability/consistency matching (default: 0.3)"
+    echo "  --min-volume-db N       Minimum volume in dB to use segments (e.g., -40)"
+    echo "                          Segments quieter than this threshold are excluded"
     echo "  --no-transposition      Disable pitch transposition"
     echo "  --max-transpose N       Maximum semitones to transpose (default: 12)"
     echo "  --no-combine-clips      Disable combining clips for duration"

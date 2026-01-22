@@ -46,7 +46,8 @@ pip install -r requirements.txt      # Install dependencies
 ./batch_pitch_source.sh <folder_path> [--extensions mp4,mov] [--dry-run]  # Batch process folder
 
 # Step 3: Match guide to source
-./test_pitch_matcher.sh data/segments/guide_sequence.json data/segments/source_database.json
+# --min-volume-db: filter out quiet segments (e.g., -40 excludes segments quieter than -40 dB)
+./test_pitch_matcher.sh data/segments/guide_sequence.json data/segments/source_database.json [--min-volume-db -40]
 
 # Step 4: Assemble final video
 ./test_pitch_video_assembly.sh data/segments/match_plan.json
@@ -124,6 +125,7 @@ python src/semantic_matcher.py --audio-embeddings <audio.json> --video-embedding
 - Pitch: exact MIDI match, nearest pitch fallback, duration-weighted scoring
 - Duration: matches guide segments to clips by finding shortest clip >= target duration
 - Reuse policies control clip repetition: `none`, `allow`, `min_gap`, `limited`, `percentage`
+- Volume filtering: `--min-volume-db` excludes quiet segments (uses pre-computed `rms_db` values)
 
 **Duration Matching** (`src/duration_source_analyzer.py`, `src/duration_matcher.py`, `src/duration_video_assembler.py`):
 - Scans folder of video clips, catalogs duration and video metadata
@@ -169,6 +171,35 @@ Guide sequence → Duration matcher → Match plan with crop instructions
 - `data/segments/match_plan.json` - Pitch matching instructions
 - `data/segments/duration_database.json` - Duration database with clip metadata
 - `data/segments/duration_match_plan.json` - Duration matching instructions with crop frames
+
+## Volume Filtering Workflow
+
+The pitch matcher can exclude quiet segments using `--min-volume-db`. Each source segment has a pre-computed `rms_db` value (typical range: -50 to -20 dB, closer to 0 = louder).
+
+**Finding the right threshold:**
+
+1. Run matching without filtering to see volume values in the output:
+   ```bash
+   ./test_pitch_matcher.sh guide.json source.json
+   ```
+
+2. Inspect the match plan to find quiet segments:
+   ```bash
+   # Find segments quieter than -45 dB
+   jq '.matches[] | select(.source_rms_db != null and .source_rms_db < -45) |
+     {segment: .guide_segment_id, note: .source_pitch_note, rms_db: .source_rms_db, video: .source_video_path}' \
+     data/segments/match_plan.json
+   ```
+
+3. Re-run with filtering:
+   ```bash
+   ./test_pitch_matcher.sh guide.json source.json --min-volume-db -40
+   ```
+
+**Typical values:**
+- Normal singing: -40 to -20 dB
+- Quiet passages: -50 to -40 dB
+- Near-silence: below -50 dB
 
 ## Dependencies
 
