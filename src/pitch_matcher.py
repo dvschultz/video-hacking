@@ -99,6 +99,7 @@ class PitchMatcher:
         self.segment_usage = defaultdict(int)  # segment_id -> usage count
         self.last_used_position = {}  # segment_id -> last position used
         self.missing_pitches = set()  # MIDI notes not in source database
+        self.volume_filtered_count = 0  # Segments excluded by volume filter
 
     def load_guide_sequence(self):
         """Load guide sequence from JSON."""
@@ -216,6 +217,33 @@ class PitchMatcher:
         else:
             return True
 
+    def _get_available_segments(self, candidate_ids: List[int], position: int) -> List[int]:
+        """
+        Filter segment IDs by volume and reuse policy.
+
+        Args:
+            candidate_ids: List of candidate segment IDs
+            position: Current position in guide sequence
+
+        Returns:
+            List of available segment IDs after filtering
+        """
+        initial_count = len(candidate_ids)
+
+        # Filter by minimum volume if specified
+        if self.min_volume_db is not None:
+            candidate_ids = [
+                seg_id for seg_id in candidate_ids
+                if self.source_database[seg_id].get('rms_db', -float('inf')) >= self.min_volume_db
+            ]
+            self.volume_filtered_count += initial_count - len(candidate_ids)
+
+        # Filter by reuse policy
+        return [
+            seg_id for seg_id in candidate_ids
+            if self.can_use_segment(seg_id, position)
+        ]
+
     def find_exact_match(self, guide_seg: Dict, position: int) -> Optional[Dict]:
         """
         Find exact pitch match from source database.
@@ -233,21 +261,9 @@ class PitchMatcher:
         if target_midi not in self.source_pitch_index:
             return None
 
-        # Get all segments with this pitch
+        # Get all segments with this pitch and filter by volume/reuse policy
         candidate_ids = self.source_pitch_index[target_midi]
-
-        # Filter by minimum volume if specified
-        if self.min_volume_db is not None:
-            candidate_ids = [
-                seg_id for seg_id in candidate_ids
-                if self.source_database[seg_id].get('rms_db', 0) >= self.min_volume_db
-            ]
-
-        # Filter by reuse policy
-        available_ids = [
-            seg_id for seg_id in candidate_ids
-            if self.can_use_segment(seg_id, position)
-        ]
+        available_ids = self._get_available_segments(candidate_ids, position)
 
         if not available_ids:
             return None
@@ -306,18 +322,7 @@ class PitchMatcher:
                 continue
 
             candidate_ids = self.source_pitch_index[source_midi]
-
-            # Filter by minimum volume if specified
-            if self.min_volume_db is not None:
-                candidate_ids = [
-                    seg_id for seg_id in candidate_ids
-                    if self.source_database[seg_id].get('rms_db', 0) >= self.min_volume_db
-                ]
-
-            available_ids = [
-                seg_id for seg_id in candidate_ids
-                if self.can_use_segment(seg_id, position)
-            ]
+            available_ids = self._get_available_segments(candidate_ids, position)
 
             if not available_ids:
                 continue
@@ -603,6 +608,11 @@ class PitchMatcher:
         print(f"  Segments reused: {reused_segments}")
         print(f"  Maximum reuse count: {max_reuse}")
 
+        if self.min_volume_db is not None:
+            print(f"\nVolume filtering:")
+            print(f"  Minimum volume threshold: {self.min_volume_db} dB")
+            print(f"  Segments filtered out: {self.volume_filtered_count}")
+
     def save_match_plan(self, output_path: str):
         """
         Save match plan to JSON file.
@@ -637,7 +647,8 @@ class PitchMatcher:
                 'consistency_weight': self.consistency_weight,
                 'allow_transposition': self.allow_transposition,
                 'max_transposition_semitones': self.max_transposition_semitones,
-                'combine_clips_for_duration': self.combine_clips_for_duration
+                'combine_clips_for_duration': self.combine_clips_for_duration,
+                'min_volume_db': self.min_volume_db
             },
             'statistics': {
                 'total_guide_segments': len(self.guide_sequence),
@@ -647,7 +658,8 @@ class PitchMatcher:
                 'rest_segments': rest_count,
                 'unique_source_segments_used': len(self.segment_usage),
                 'segments_reused': reused_segments,
-                'max_reuse_count': max(self.segment_usage.values()) if self.segment_usage else 0
+                'max_reuse_count': max(self.segment_usage.values()) if self.segment_usage else 0,
+                'segments_filtered_by_volume': self.volume_filtered_count
             },
             'missing_pitches': missing_pitches_list,
             'matches': self.matches
