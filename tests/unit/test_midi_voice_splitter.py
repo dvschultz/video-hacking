@@ -5,6 +5,7 @@ Unit tests for midi_voice_splitter.py - MIDI polyphonic voice splitting.
 import pytest
 import json
 import numpy as np
+from collections import defaultdict
 from pathlib import Path
 from unittest.mock import patch, MagicMock, PropertyMock
 import sys
@@ -100,6 +101,7 @@ class TestMIDIVoiceSplitter:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_initialization(self, splitter):
@@ -140,6 +142,7 @@ class TestVoiceAssignment:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_two_note_chord(self, splitter):
@@ -250,6 +253,7 @@ class TestVoiceAssignmentEdgeCases:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_sustained_note_keeps_voice(self, splitter):
@@ -343,6 +347,7 @@ class TestSegmentBuilding:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_rest_insertion(self, splitter):
@@ -463,6 +468,7 @@ class TestOutputFormat:
             s.voice_assignments = {0: 1, 1: 2}
             s.num_voices = 2
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_json_structure(self, splitter, temp_dir):
@@ -542,6 +548,7 @@ class TestListChannels:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_list_channels_shows_polyphony(self, splitter):
@@ -635,6 +642,7 @@ class TestExtractAllNotes:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_overlapping_notes_preserved(self, splitter):
@@ -728,6 +736,7 @@ class TestErrorHandling:
         s.voice_assignments = {}
         s.num_voices = 0
         s.voice_segments = {}
+        s.strategy = 'pitch-ordered'
 
         # MIDI file with no notes on channel 5
         track_data = [
@@ -761,6 +770,7 @@ class TestMergeSmallRests:
             s.voice_assignments = {}
             s.num_voices = 0
             s.voice_segments = {}
+            s.strategy = 'pitch-ordered'
         return s
 
     def test_small_gaps_merged(self, splitter):
@@ -796,6 +806,158 @@ class TestMergeSmallRests:
 
         # Gap is 0.5s (>= 0.1), so no change
         assert splitter.notes[0]['end_time'] == pytest.approx(0.5)
+
+
+class TestBalancedAssignment:
+    """Test balanced (least-time) voice assignment strategy."""
+
+    @pytest.fixture
+    def splitter(self, temp_dir):
+        with patch('builtins.print'):
+            from midi_voice_splitter import MIDIVoiceSplitter
+            s = MIDIVoiceSplitter.__new__(MIDIVoiceSplitter)
+            s.midi_path = temp_dir / "test.mid"
+            s.channel = 0
+            s.output_dir = temp_dir
+            s.min_rest = 0.1
+            s.sample_rate = 22050
+            s.midi_file = None
+            s.ticks_per_beat = 480
+            s.notes = []
+            s.voice_assignments = {}
+            s.num_voices = 0
+            s.voice_segments = {}
+            s.strategy = 'balanced'
+        return s
+
+    def test_sequential_notes_round_robin(self, splitter):
+        """Sequential notes are assigned to the voice with least accumulated time."""
+        # With 2-voice polyphony established by a chord, sequential notes
+        # should alternate between voices based on accumulated time
+        splitter.notes = [
+            # Chord establishes 2 voices
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            # Sequential notes after chord — each goes to voice with least time
+            {'id': 2, 'pitch_midi': 67, 'start_time': 1.0, 'end_time': 2.0, 'duration': 1.0},
+            {'id': 3, 'pitch_midi': 72, 'start_time': 2.0, 'end_time': 3.0, 'duration': 1.0},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        # Chord: both voices get 1.0s each (voices 1 and 2, order depends on available sort)
+        # After chord: both voices have 1.0s, so next note goes to voice 1 (tiebreak lowest)
+        assert assignments[2] in (1, 2)
+        # Next note goes to whichever voice has less time
+        assert assignments[3] in (1, 2)
+        # The two sequential notes should go to different voices (round-robin effect)
+        assert assignments[2] != assignments[3]
+
+    def test_chord_uses_all_voices(self, splitter):
+        """A chord with N notes uses N voices (no choice)."""
+        splitter.notes = [
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 2, 'pitch_midi': 67, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        voices = {assignments[0], assignments[1], assignments[2]}
+        assert voices == {1, 2, 3}
+        assert splitter.num_voices == 3
+
+    def test_sustained_notes_keep_voice(self, splitter):
+        """A sustained note keeps its voice; new notes go to available voices."""
+        splitter.notes = [
+            # C4 sustains across both time groups
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 3.0, 'duration': 3.0},
+            # E4 in first time group
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            # G4 enters after E4 ends
+            {'id': 2, 'pitch_midi': 67, 'start_time': 1.0, 'end_time': 2.0, 'duration': 1.0},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        # C4 and E4 get voices from the chord
+        voice_c4 = assignments[0]
+        voice_e4 = assignments[1]
+        assert voice_c4 != voice_e4
+
+        # At t=1.0: C4 still sustained (keeps its voice), E4 expired
+        # G4 must go to the available voice (E4's old voice), not C4's
+        voice_g4 = assignments[2]
+        assert voice_g4 != voice_c4  # Can't use sustained voice
+        assert voice_g4 == voice_e4  # Only available voice
+
+    def test_balanced_distributes_evenly(self, splitter):
+        """Monophonic section after a chord distributes notes more evenly than pitch-ordered."""
+        splitter.notes = [
+            # Opening chord establishes 3 voices
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 2, 'pitch_midi': 67, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            # 6 sequential notes — should distribute ~2 per voice
+            {'id': 3, 'pitch_midi': 72, 'start_time': 1.0, 'end_time': 2.0, 'duration': 1.0},
+            {'id': 4, 'pitch_midi': 74, 'start_time': 2.0, 'end_time': 3.0, 'duration': 1.0},
+            {'id': 5, 'pitch_midi': 76, 'start_time': 3.0, 'end_time': 4.0, 'duration': 1.0},
+            {'id': 6, 'pitch_midi': 77, 'start_time': 4.0, 'end_time': 5.0, 'duration': 1.0},
+            {'id': 7, 'pitch_midi': 79, 'start_time': 5.0, 'end_time': 6.0, 'duration': 1.0},
+            {'id': 8, 'pitch_midi': 81, 'start_time': 6.0, 'end_time': 7.0, 'duration': 1.0},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        # Count notes per voice
+        voice_counts = defaultdict(int)
+        for voice in assignments.values():
+            voice_counts[voice] += 1
+
+        # Each voice should have 3 notes (1 from chord + 2 from sequence)
+        assert splitter.num_voices == 3
+        for v in range(1, 4):
+            assert voice_counts[v] == 3, f"Voice {v} has {voice_counts[v]} notes, expected 3"
+
+    def test_tiebreak_lowest_voice(self, splitter):
+        """When voices have equal time, the lowest voice number wins."""
+        # All sequential notes with equal duration — voice 1 should get first pick each round
+        splitter.notes = [
+            # Chord to establish 2 voices with equal time
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.0, 'end_time': 1.0, 'duration': 1.0},
+            # First sequential note — both voices have 1.0s, voice 1 wins tiebreak
+            {'id': 2, 'pitch_midi': 67, 'start_time': 1.0, 'end_time': 2.0, 'duration': 1.0},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        # Voice 1 should win the tiebreak (lowest voice number)
+        assert assignments[2] == 1
+
+    def test_empty_notes_balanced(self, splitter):
+        """Empty note list produces no assignments."""
+        splitter.notes = []
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        assert assignments == {}
+        assert splitter.num_voices == 0
+
+    def test_monophonic_input_balanced(self, splitter):
+        """Monophonic input: all notes assigned to voice 1."""
+        splitter.notes = [
+            {'id': 0, 'pitch_midi': 60, 'start_time': 0.0, 'end_time': 0.5, 'duration': 0.5},
+            {'id': 1, 'pitch_midi': 64, 'start_time': 0.5, 'end_time': 1.0, 'duration': 0.5},
+            {'id': 2, 'pitch_midi': 67, 'start_time': 1.0, 'end_time': 1.5, 'duration': 0.5},
+        ]
+        with patch('builtins.print'):
+            assignments = splitter.assign_voices()
+
+        assert assignments[0] == 1
+        assert assignments[1] == 1
+        assert assignments[2] == 1
+        assert splitter.num_voices == 1
 
 
 class TestTicksToSeconds:

@@ -80,8 +80,11 @@ def get_instrument_name(program: int, channel: int = 0) -> str:
 class MIDIVoiceSplitter:
     """Splits a polyphonic MIDI channel into monophonic voice files."""
 
+    STRATEGIES = ('pitch-ordered', 'balanced')
+
     def __init__(self, midi_path: str, channel: int, output_dir: str = 'data/segments',
-                 min_rest: float = 0.1, sample_rate: int = 22050):
+                 min_rest: float = 0.1, sample_rate: int = 22050,
+                 strategy: str = 'pitch-ordered'):
         """
         Initialize the voice splitter.
 
@@ -91,12 +94,16 @@ class MIDIVoiceSplitter:
             output_dir: Directory for output JSON files
             min_rest: Minimum rest duration in seconds (per-voice)
             sample_rate: Audio preview sample rate
+            strategy: Voice assignment strategy ('pitch-ordered' or 'balanced')
         """
+        if strategy not in self.STRATEGIES:
+            raise ValueError(f"Unknown strategy '{strategy}', must be one of {self.STRATEGIES}")
         self.midi_path = Path(midi_path)
         self.channel = channel
         self.output_dir = Path(output_dir)
         self.min_rest = min_rest
         self.sample_rate = sample_rate
+        self.strategy = strategy
 
         self.midi_file = None
         self.ticks_per_beat = 480
@@ -332,6 +339,24 @@ class MIDIVoiceSplitter:
 
     def assign_voices(self) -> Dict[int, int]:
         """
+        Assign each note to a voice using the configured strategy.
+
+        Dispatches to strategy-specific method based on self.strategy.
+
+        Returns:
+            Dictionary mapping note_id to voice_number (1-indexed)
+        """
+        if not self.notes:
+            self.voice_assignments = {}
+            self.num_voices = 0
+            return {}
+
+        if self.strategy == 'balanced':
+            return self._assign_voices_balanced()
+        return self._assign_voices_pitch_ordered()
+
+    def _assign_voices_pitch_ordered(self) -> Dict[int, int]:
+        """
         Assign each note to a voice using pitch-ordered assignment.
 
         At each note's start time:
@@ -344,11 +369,6 @@ class MIDIVoiceSplitter:
         Returns:
             Dictionary mapping note_id to voice_number (1-indexed)
         """
-        if not self.notes:
-            self.voice_assignments = {}
-            self.num_voices = 0
-            return {}
-
         voice_assignments = {}
         # active_notes: list of (note_id, pitch_midi, end_time, assigned_voice)
         active_notes = []
@@ -394,7 +414,79 @@ class MIDIVoiceSplitter:
         self.voice_assignments = voice_assignments
         self.num_voices = max_voices
 
-        print(f"Assigned {len(voice_assignments)} notes to {max_voices} voices")
+        print(f"Assigned {len(voice_assignments)} notes to {max_voices} voices (pitch-ordered)")
+        return voice_assignments
+
+    def _assign_voices_balanced(self) -> Dict[int, int]:
+        """
+        Assign each note to a voice using balanced (least-time) assignment.
+
+        At each note's start time:
+        1. Remove expired notes (end_time <= start_time)
+        2. Batch all note_on events at the same start time
+        3. Sustained notes keep their voice (no mid-note reassignment)
+        4. New notes are assigned to available voices (not occupied by sustained
+           notes) sorted by least cumulative sounding time, ties broken by
+           lowest voice number
+
+        Returns:
+            Dictionary mapping note_id to voice_number (1-indexed)
+        """
+        voice_assignments = {}
+        # active_notes: list of (note_id, end_time, assigned_voice)
+        active_notes = []
+        # Cumulative sounding time per voice
+        voice_sounding_time = defaultdict(float)
+        max_voices = 0
+
+        # First pass: determine max polyphony (needed to know how many voices exist)
+        time_groups = []
+        for start_time, group in groupby(self.notes, key=lambda n: n['start_time']):
+            time_groups.append((start_time, list(group)))
+
+        # Calculate max simultaneous notes to know voice count
+        temp_active = []
+        for start_time, new_notes in time_groups:
+            temp_active = [end for end in temp_active if end > start_time]
+            for n in new_notes:
+                temp_active.append(n['end_time'])
+            max_voices = max(max_voices, len(temp_active))
+
+        for start_time, new_notes in time_groups:
+            # Remove expired notes
+            active_notes = [
+                (nid, end, v) for nid, end, v in active_notes
+                if end > start_time
+            ]
+
+            # Voices occupied by sustained notes
+            occupied_voices = {v for _, _, v in active_notes}
+
+            # Available voices sorted by (cumulative_time, voice_number)
+            available = sorted(
+                [v for v in range(1, max_voices + 1) if v not in occupied_voices],
+                key=lambda v: (voice_sounding_time[v], v)
+            )
+
+            # Assign new notes to available voices in order
+            for i, n in enumerate(new_notes):
+                if i < len(available):
+                    voice = available[i]
+                else:
+                    # More new notes than available voices — shouldn't happen if
+                    # max_voices was calculated correctly, but handle gracefully
+                    voice = max_voices + 1
+                    max_voices = voice
+                    available.append(voice)
+
+                voice_assignments[n['id']] = voice
+                voice_sounding_time[voice] += n['duration']
+                active_notes.append((n['id'], n['end_time'], voice))
+
+        self.voice_assignments = voice_assignments
+        self.num_voices = max_voices
+
+        print(f"Assigned {len(voice_assignments)} notes to {max_voices} voices (balanced)")
         return voice_assignments
 
     def build_voice_segments(self) -> Dict[int, List[Dict]]:
@@ -736,6 +828,11 @@ def main():
         help='Skip audio preview generation'
     )
     parser.add_argument(
+        '--strategy', type=str, default='pitch-ordered',
+        choices=['pitch-ordered', 'balanced'],
+        help='Voice assignment strategy (default: pitch-ordered)'
+    )
+    parser.add_argument(
         '--list-channels', action='store_true',
         help='List channels with polyphony info and exit'
     )
@@ -801,7 +898,8 @@ def main():
         args.midi, args.channel,
         output_dir=args.output_dir,
         min_rest=args.min_rest,
-        sample_rate=args.sample_rate
+        sample_rate=args.sample_rate,
+        strategy=args.strategy
     )
 
     result = splitter.split(
