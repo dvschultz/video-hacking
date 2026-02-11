@@ -70,12 +70,14 @@ def merge_channels(midi_path, channels, target_channel, output_path):
 
     for track_idx, track in enumerate(mid.tracks):
         new_track = mido.MidiTrack()
+        pending_delta = 0  # Accumulate delta time from dropped messages
 
         for msg in track:
             if hasattr(msg, 'channel'):
                 if msg.channel in channels_set:
-                    # Remap to target channel
-                    new_msg = msg.copy(channel=target_channel)
+                    # Remap to target channel, absorbing any pending delta
+                    new_msg = msg.copy(channel=target_channel, time=msg.time + pending_delta)
+                    pending_delta = 0
                     new_track.append(new_msg)
                     if msg.type in ('note_on', 'note_off'):
                         total_remapped += 1
@@ -84,13 +86,18 @@ def merge_channels(midi_path, channels, target_channel, output_path):
                 else:
                     # Drop note events from other channels, keep non-note messages
                     if msg.type in ('note_on', 'note_off'):
+                        pending_delta += msg.time
                         total_dropped += 1
                     else:
-                        new_track.append(msg)
+                        new_msg = msg.copy(time=msg.time + pending_delta)
+                        pending_delta = 0
+                        new_track.append(new_msg)
                         total_kept += 1
             else:
                 # Non-channel messages (tempo, time signature, etc.) — always keep
-                new_track.append(msg)
+                new_msg = msg.copy(time=msg.time + pending_delta)
+                pending_delta = 0
+                new_track.append(new_msg)
                 total_kept += 1
 
         new_mid.tracks.append(new_track)
