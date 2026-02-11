@@ -25,7 +25,8 @@ class EDLEvent:
                  source_in: float, source_out: float,
                  record_in: float, record_out: float,
                  frame_rate: float, reel_name: str = None,
-                 is_black: bool = False, comment: str = None):
+                 is_black: bool = False, comment: str = None,
+                 pitch_shift_semitones: float = 0):
         self.event_num = event_num
         self.source_path = source_path
         self.source_in = source_in
@@ -36,6 +37,7 @@ class EDLEvent:
         self.reel_name = reel_name or f"{event_num:03d}"
         self.is_black = is_black
         self.comment = comment
+        self.pitch_shift_semitones = pitch_shift_semitones
 
     def _seconds_to_timecode(self, seconds: float, drop_frame: bool = False) -> str:
         """Convert seconds to SMPTE timecode HH:MM:SS:FF"""
@@ -80,6 +82,7 @@ class EDLEvent:
             clip_name = Path(self.source_path).name
             lines.append(f"* FROM CLIP NAME: {clip_name}")
             lines.append(f"* SOURCE FILE: {self.source_path}")
+            lines.append(f"* PITCH SHIFT: {self.pitch_shift_semitones:+.1f} semitones")
 
         if self.comment:
             lines.append(f"* {self.comment}")
@@ -122,7 +125,8 @@ class EDLGenerator:
 
     def add_event(self, source_path: str, source_in: float, source_out: float,
                   record_in: float = None, record_out: float = None,
-                  reel_name: str = None, comment: str = None) -> 'EDLGenerator':
+                  reel_name: str = None, comment: str = None,
+                  pitch_shift_semitones: float = 0) -> 'EDLGenerator':
         """
         Add a video clip event to the EDL.
 
@@ -134,6 +138,7 @@ class EDLGenerator:
             record_out: End time on timeline (seconds), auto-calculated if None
             reel_name: Optional reel identifier (max 8 chars)
             comment: Optional comment to add
+            pitch_shift_semitones: Pitch shift to apply in semitones (0 = no shift)
 
         Returns:
             self for chaining
@@ -157,7 +162,8 @@ class EDLGenerator:
             frame_rate=self.frame_rate,
             reel_name=reel_name,
             is_black=False,
-            comment=comment
+            comment=comment,
+            pitch_shift_semitones=pitch_shift_semitones
         )
 
         self.events.append(event)
@@ -335,9 +341,8 @@ def generate_edl_from_matches(
             crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
             if crop_mode:
                 comment_parts.append(f"Crop: {crop_mode}")
+
             transpose = match.get('transpose_semitones', 0)
-            if transpose != 0:
-                comment_parts.append(f"Transpose: {transpose:+d} semitones")
 
             edl.add_event(
                 source_path=video_path,
@@ -345,7 +350,8 @@ def generate_edl_from_matches(
                 source_out=source_out,
                 record_in=timeline_position,
                 record_out=timeline_position + guide_duration,
-                comment=", ".join(comment_parts)
+                comment=", ".join(comment_parts),
+                pitch_shift_semitones=transpose
             )
 
         # Advance timeline by guide duration
