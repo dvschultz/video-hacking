@@ -795,13 +795,105 @@ class PitchVideoAssembler:
 
         print("\n=== Video Assembly Complete ===")
 
-    def generate_edl(self, output_path: str, frame_rate: float = None) -> str:
+    def generate_pitch_shifted_videos(self) -> dict:
+        """
+        Pre-generate pitch-shifted copies of source videos for EDL workflow.
+
+        Scans match plan for unique (source_video_path, transpose_semitones) pairs
+        where transpose_semitones != 0, and generates a pitch-shifted copy of the
+        entire source video using ffmpeg's rubberband filter (video stream is copied,
+        only audio is re-encoded).
+
+        Returns:
+            Dict mapping (original_path, semitones) -> new_path
+        """
+        # Collect unique (video_path, semitones) pairs that need shifting
+        pairs_needed = set()
+        for match in self.matches:
+            transpose = match.get('transpose_semitones', 0)
+            if transpose == 0:
+                continue
+            for clip in match.get('source_clips', []):
+                video_path = clip.get('video_path', '')
+                if video_path:
+                    pairs_needed.add((video_path, transpose))
+
+        if not pairs_needed:
+            return {}
+
+        print(f"\n=== Pre-generating Pitch-Shifted Videos ===")
+        print(f"  {len(pairs_needed)} unique (video, shift) pair(s) to process")
+
+        # Check that ffmpeg has rubberband filter
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-filters'],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
+            if 'rubberband' not in result.stdout:
+                print("\nERROR: ffmpeg does not have the rubberband filter.")
+                print("Install librubberband:")
+                print("  macOS:  brew install rubberband")
+                print("  conda:  conda install -c conda-forge rubberband")
+                print("  Ubuntu: sudo apt-get install librubberband-dev")
+                print("\nSkipping pitch-shifted video generation.")
+                return {}
+        except FileNotFoundError:
+            print("\nERROR: ffmpeg not found.")
+            return {}
+
+        # Create output directory next to the output video
+        pitch_shifted_dir = self.output_path.parent / "pitch_shifted"
+        pitch_shifted_dir.mkdir(parents=True, exist_ok=True)
+
+        pitch_shifted_map = {}
+        for video_path, semitones in sorted(pairs_needed):
+            source = Path(video_path)
+            sign = "+" if semitones > 0 else ""
+            shifted_name = f"{source.stem}_pitch{sign}{semitones}st{source.suffix}"
+            shifted_path = pitch_shifted_dir / shifted_name
+
+            # Skip if already generated
+            if shifted_path.exists():
+                print(f"  Already exists: {shifted_name}")
+                pitch_shifted_map[(video_path, semitones)] = str(shifted_path)
+                continue
+
+            # Calculate pitch ratio: 2^(semitones/12)
+            ratio = 2 ** (semitones / 12.0)
+
+            print(f"  Generating: {shifted_name} (ratio={ratio:.4f})")
+
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(source),
+                '-af', f'rubberband=pitch={ratio}',
+                '-c:v', 'copy',
+                str(shifted_path)
+            ]
+
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+                pitch_shifted_map[(video_path, semitones)] = str(shifted_path)
+                print(f"    Done: {shifted_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"    ERROR generating {shifted_name}: {e.stderr.decode()[:200]}")
+                # Clean up partial file
+                shifted_path.unlink(missing_ok=True)
+
+        print(f"  Generated {len(pitch_shifted_map)} pitch-shifted video(s)")
+        return pitch_shifted_map
+
+    def generate_edl(self, output_path: str, frame_rate: float = None,
+                     pitch_shifted_paths: dict = None) -> str:
         """
         Generate EDL file from match plan.
 
         Args:
             output_path: Path for output EDL file
             frame_rate: Frame rate for EDL timecode display (uses target_fps if None)
+            pitch_shifted_paths: Optional dict mapping (original_path, semitones) -> shifted_path
+                                 from generate_pitch_shifted_videos()
 
         Returns:
             Path to generated EDL file
@@ -829,7 +921,8 @@ class PitchVideoAssembler:
             frame_rate=frame_rate,
             video_fps_map=video_fps_map,
             verbose=True,
-            force_black_rests=self.use_true_silence
+            force_black_rests=self.use_true_silence,
+            pitch_shifted_paths=pitch_shifted_paths
         )
 
     def cleanup(self):
@@ -990,7 +1083,10 @@ def main():
     if args.edl_only:
         # For EDL-only, we need fps but don't need to process video
         fps = target_fps or 24.0
-        assembler.generate_edl(edl_output_path, frame_rate=fps)
+        # Generate pitch-shifted source videos before EDL
+        pitch_shifted_map = assembler.generate_pitch_shifted_videos()
+        assembler.generate_edl(edl_output_path, frame_rate=fps,
+                               pitch_shifted_paths=pitch_shifted_map)
         print("\n=== EDL Generation Complete ===")
         return
 
@@ -1002,7 +1098,9 @@ def main():
 
     # Generate EDL if requested
     if args.edl:
-        assembler.generate_edl(edl_output_path)
+        pitch_shifted_map = assembler.generate_pitch_shifted_videos()
+        assembler.generate_edl(edl_output_path,
+                               pitch_shifted_paths=pitch_shifted_map)
 
     # Cleanup temporary files
     if not args.no_cleanup:
