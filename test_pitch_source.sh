@@ -64,21 +64,24 @@ if [ ! -f "$SOURCE_VIDEO" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/segments"
+# Parse --output from extra args if provided, and build filtered args
 TEMP_DIR="data/temp"
-OUTPUT_JSON="$OUTPUT_DIR/source_database.json"
-
-# Check if user provided custom output path
-for arg in "$@"; do
-    if [[ "$arg" == "--output" ]]; then
-        CUSTOM_OUTPUT=true
-        break
+OUTPUT_JSON="data/segments/source_database.json"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
     fi
 done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_JSON")"
 mkdir -p "$TEMP_DIR"
 
 # Detect Python command
@@ -93,33 +96,14 @@ fi
 
 echo -e "${GREEN}Building pitch database from source video${NC}"
 echo "Input: $SOURCE_VIDEO"
+echo "Output: $OUTPUT_JSON"
+echo ""
 
-# Build command with conditional output flag
-if [ -z "$CUSTOM_OUTPUT" ]; then
-    echo "Output: $OUTPUT_JSON"
-    echo ""
-    $PYTHON_CMD src/pitch_source_analyzer.py \
-        --video "$SOURCE_VIDEO" \
-        --output "$OUTPUT_JSON" \
-        --temp-dir "$TEMP_DIR" \
-        "$@"
-else
-    # Let user's --output flag pass through
-    echo "Output: (custom path specified)"
-    echo ""
-    $PYTHON_CMD src/pitch_source_analyzer.py \
-        --video "$SOURCE_VIDEO" \
-        --temp-dir "$TEMP_DIR" \
-        "$@"
-
-    # Extract custom output path for status display
-    for i in "${!BASH_ARGV[@]}"; do
-        if [[ "${BASH_ARGV[$i]}" == "--output" ]]; then
-            OUTPUT_JSON="${BASH_ARGV[$((i-1))]}"
-            break
-        fi
-    done
-fi
+$PYTHON_CMD src/pitch_source_analyzer.py \
+    --video "$SOURCE_VIDEO" \
+    --output "$OUTPUT_JSON" \
+    --temp-dir "$TEMP_DIR" \
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Database Building Complete ===${NC}"

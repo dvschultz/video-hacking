@@ -65,20 +65,23 @@ if [ ! -f "$SOURCE_JSON" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/segments"
-OUTPUT_JSON="$OUTPUT_DIR/duration_match_plan.json"
-
-# Check if user provided custom output path
-for arg in "$@"; do
-    if [[ "$arg" == "--output" ]]; then
-        CUSTOM_OUTPUT=true
-        break
+# Parse --output from extra args if provided, and build filtered args
+OUTPUT_JSON="data/segments/duration_match_plan.json"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
     fi
 done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_JSON")"
 
 # Detect Python command
 if command -v python &> /dev/null; then
@@ -93,24 +96,14 @@ fi
 echo -e "${GREEN}Matching guide to source by duration${NC}"
 echo "Guide: $GUIDE_JSON"
 echo "Source: $SOURCE_JSON"
+echo "Output: $OUTPUT_JSON"
+echo ""
 
-# Build command with conditional output flag
-if [ -z "$CUSTOM_OUTPUT" ]; then
-    echo "Output: $OUTPUT_JSON"
-    echo ""
-    $PYTHON_CMD src/duration_matcher.py \
-        --guide "$GUIDE_JSON" \
-        --source "$SOURCE_JSON" \
-        --output "$OUTPUT_JSON" \
-        "$@"
-else
-    echo "Output: (custom path specified)"
-    echo ""
-    $PYTHON_CMD src/duration_matcher.py \
-        --guide "$GUIDE_JSON" \
-        --source "$SOURCE_JSON" \
-        "$@"
-fi
+$PYTHON_CMD src/duration_matcher.py \
+    --guide "$GUIDE_JSON" \
+    --source "$SOURCE_JSON" \
+    --output "$OUTPUT_JSON" \
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Matching Complete ===${NC}"
