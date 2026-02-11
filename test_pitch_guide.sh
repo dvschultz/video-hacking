@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Pitch Guide Analyzer Test ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <guide_video.mp4> [options]"
@@ -98,27 +96,20 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Step 1: Analyzing guide video pitch sequence${NC}"
-echo "Input: $GUIDE_VIDEO"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/pitch_guide_analyzer.py \
     --video "$GUIDE_VIDEO" \
     --output "$OUTPUT_JSON" \
     --temp-dir "$TEMP_DIR" \
     "${FILTERED_ARGS[@]}"
 
-echo ""
-echo -e "${GREEN}Step 2: Creating MIDI preview video${NC}"
-echo ""
-
-# Determine preview video path (same directory as output JSON)
+# Create MIDI preview video
 PREVIEW_DIR=$(dirname "$OUTPUT_JSON")
 PREVIEW_VIDEO="$PREVIEW_DIR/guide_midi_preview.mp4"
 mkdir -p "$PREVIEW_DIR"
 
+echo ""
 if [ -f "$OUTPUT_JSON" ]; then
+    echo "Creating MIDI preview video..."
     $PYTHON_CMD src/pitch_video_preview.py \
         --video "$GUIDE_VIDEO" \
         --pitch-json "$OUTPUT_JSON" \
@@ -127,12 +118,6 @@ else
     echo -e "${YELLOW}Warning: Output JSON not found, skipping preview video${NC}"
 fi
 
-echo ""
-echo -e "${GREEN}=== Analysis Complete ===${NC}"
-echo ""
-echo "Results saved to:"
-echo "  - Pitch sequence: $OUTPUT_JSON"
-echo "  - Preview video: $PREVIEW_VIDEO"
 echo ""
 echo "Next steps:"
 echo "  1. Watch $PREVIEW_VIDEO to verify pitch detection"

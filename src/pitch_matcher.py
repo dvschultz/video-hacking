@@ -848,7 +848,6 @@ def main():
             edl_path = str(Path(args.output).with_suffix('.edl'))
         matcher.generate_edl(edl_path, frame_rate=args.fps)
 
-    print("\n=== Matching Complete ===")
 
 
 if __name__ == "__main__":

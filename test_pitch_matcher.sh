@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Pitch Matcher ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <guide_sequence.json> <source_database.json> [options]"
@@ -106,43 +104,11 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Matching guide sequence to source database${NC}"
-echo "Guide: $GUIDE_JSON"
-echo "Source: $SOURCE_JSON"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/pitch_matcher.py \
     --guide "$GUIDE_JSON" \
     --source "$SOURCE_JSON" \
     --output "$OUTPUT_JSON" \
     "${FILTERED_ARGS[@]}"
-
-echo ""
-echo -e "${GREEN}=== Matching Complete ===${NC}"
-echo ""
-echo "Results saved to:"
-echo "  - Match plan: $OUTPUT_JSON"
-echo ""
-
-# Extract and display stats
-if [ -f "$OUTPUT_JSON" ]; then
-    echo "Match statistics:"
-
-    TOTAL=$(grep -o '"total_guide_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    EXACT=$(grep -o '"exact_matches": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    TRANSPOSED=$(grep -o '"transposed_matches": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    MISSING=$(grep -o '"missing_matches": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    UNIQUE=$(grep -o '"unique_source_segments_used": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    REUSED=$(grep -o '"segments_reused": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-
-    echo "  - Total guide segments: $TOTAL"
-    echo "  - Exact matches: $EXACT"
-    echo "  - Transposed matches: $TRANSPOSED"
-    echo "  - Missing matches: $MISSING"
-    echo "  - Unique source segments used: $UNIQUE"
-    echo "  - Segments reused: $REUSED"
-fi
 
 echo ""
 echo "Next steps:"

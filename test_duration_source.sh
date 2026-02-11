@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Duration Source Database Builder ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <folder_path> [options]"
@@ -73,30 +71,10 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Building duration database from folder${NC}"
-echo "Input: $FOLDER_PATH"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/duration_source_analyzer.py \
     --folder "$FOLDER_PATH" \
     --output "$OUTPUT_JSON" \
     "${FILTERED_ARGS[@]}"
-
-echo ""
-echo -e "${GREEN}=== Database Building Complete ===${NC}"
-echo ""
-
-if [ -f "$OUTPUT_JSON" ]; then
-    echo "Database statistics:"
-    # Extract key stats from JSON
-    NUM_CLIPS=$(grep -o '"num_clips": [0-9]*' "$OUTPUT_JSON" | head -1 | grep -o '[0-9]*')
-    MIN_DUR=$(grep -o '"min": [0-9.]*' "$OUTPUT_JSON" | head -1 | grep -o '[0-9.]*')
-    MAX_DUR=$(grep -o '"max": [0-9.]*' "$OUTPUT_JSON" | head -1 | grep -o '[0-9.]*')
-
-    echo "  - Total clips: $NUM_CLIPS"
-    echo "  - Duration range: ${MIN_DUR}s - ${MAX_DUR}s"
-fi
 
 echo ""
 echo "Next steps:"

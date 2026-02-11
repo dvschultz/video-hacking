@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Duration Matcher ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <guide_sequence.json> <duration_database.json> [options]"
@@ -93,38 +91,11 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Matching guide to source by duration${NC}"
-echo "Guide: $GUIDE_JSON"
-echo "Source: $SOURCE_JSON"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/duration_matcher.py \
     --guide "$GUIDE_JSON" \
     --source "$SOURCE_JSON" \
     --output "$OUTPUT_JSON" \
     "${FILTERED_ARGS[@]}"
-
-echo ""
-echo -e "${GREEN}=== Matching Complete ===${NC}"
-echo ""
-
-if [ -f "$OUTPUT_JSON" ]; then
-    echo "Match statistics:"
-    MATCHED=$(grep -o '"matched_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    MATCHED_RESTS=$(grep -o '"matched_rest_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    UNMATCHED=$(grep -o '"unmatched_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    REST=$(grep -o '"rest_segments_black_frames": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    UNIQUE=$(grep -o '"unique_clips_used": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-
-    echo "  - Matched: $MATCHED"
-    if [ -n "$MATCHED_RESTS" ] && [ "$MATCHED_RESTS" -gt 0 ]; then
-        echo "  - Rests matched with clips: $MATCHED_RESTS"
-    fi
-    echo "  - Unmatched: $UNMATCHED"
-    echo "  - Rest segments (black frames): $REST"
-    echo "  - Unique clips used: $UNIQUE"
-fi
 
 echo ""
 echo "Next step:"

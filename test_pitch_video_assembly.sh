@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Pitch Video Assembler ===${NC}\n"
-
 # Function to show help
 show_help() {
     echo "Usage: $0 <match_plan.json> [options]"
@@ -101,42 +99,23 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Assembling video from match plan${NC}"
-echo "Match plan: $MATCH_PLAN"
-echo "Output: $OUTPUT_VIDEO"
-echo ""
-
-# Run assembler
 $PYTHON_CMD src/pitch_video_assembler.py \
     --match-plan "$MATCH_PLAN" \
     --output "$OUTPUT_VIDEO" \
     --temp-dir "$TEMP_DIR" \
     "${FILTERED_ARGS[@]}"
 
+# Show video info and next steps
 echo ""
-echo -e "${GREEN}=== Video Assembly Complete ===${NC}"
-echo ""
-
-# Check if output file exists and show info
 if [ -f "$OUTPUT_VIDEO" ]; then
-    echo "Output saved to:"
-    echo "  - $OUTPUT_VIDEO"
-    echo ""
-
-    # Get video duration and size using ffprobe
     if command -v ffprobe &> /dev/null; then
         DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_VIDEO" 2>/dev/null || echo "unknown")
         SIZE=$(du -h "$OUTPUT_VIDEO" | cut -f1)
-
         if [ "$DURATION" != "unknown" ]; then
-            DURATION_FORMATTED=$(printf "%.1f" "$DURATION")
-            echo "Video info:"
-            echo "  - Duration: ${DURATION_FORMATTED}s"
-            echo "  - File size: $SIZE"
-            echo ""
+            echo "Video info: $(printf "%.1f" "$DURATION")s, $SIZE"
         fi
     fi
-
+    echo ""
     echo "Next steps:"
     echo "  1. Review the output video: open $OUTPUT_VIDEO"
     echo "  2. Check if pitch matching sounds natural"
@@ -144,5 +123,4 @@ if [ -f "$OUTPUT_VIDEO" ]; then
 else
     echo -e "${YELLOW}Warning: Output file not created${NC}"
 fi
-
 echo ""

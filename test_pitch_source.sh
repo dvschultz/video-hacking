@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Pitch Source Database Builder ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <source_video.mp4> [options]"
@@ -94,34 +92,12 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Building pitch database from source video${NC}"
-echo "Input: $SOURCE_VIDEO"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/pitch_source_analyzer.py \
     --video "$SOURCE_VIDEO" \
     --output "$OUTPUT_JSON" \
     --temp-dir "$TEMP_DIR" \
     "${FILTERED_ARGS[@]}"
 
-echo ""
-echo -e "${GREEN}=== Database Building Complete ===${NC}"
-echo ""
-echo "Results saved to:"
-echo "  - Pitch database: $OUTPUT_JSON"
-echo ""
-echo "Database info:"
-if [ -f "$OUTPUT_JSON" ]; then
-    # Extract key stats from JSON
-    NUM_SEGMENTS=$(grep -o '"num_segments": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    NUM_PITCHES=$(grep -o '"num_unique_pitches": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-    NUM_SILENCES=$(grep -o '"num_silence_gaps": [0-9]*' "$OUTPUT_JSON" | grep -o '[0-9]*')
-
-    echo "  - Total segments: $NUM_SEGMENTS"
-    echo "  - Unique pitches: $NUM_PITCHES"
-    echo "  - Silent gaps: $NUM_SILENCES"
-fi
 echo ""
 echo "Next steps:"
 echo "  1. Review database statistics above"

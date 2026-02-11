@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Duration Video Assembler ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <duration_match_plan.json> [options]"
@@ -80,30 +78,19 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Assembling video from duration match plan${NC}"
-echo "Match plan: $MATCH_PLAN"
-echo "Output: $OUTPUT_VIDEO"
-echo ""
-
 $PYTHON_CMD src/duration_video_assembler.py \
     --match-plan "$MATCH_PLAN" \
     --output "$OUTPUT_VIDEO" \
     --temp-dir "$TEMP_DIR" \
     "${FILTERED_ARGS[@]}"
 
+# Show video info
 echo ""
-echo -e "${GREEN}=== Video Assembly Complete ===${NC}"
-echo ""
-
 if [ -f "$OUTPUT_VIDEO" ]; then
-    echo "Output saved to: $OUTPUT_VIDEO"
-
-    # Get video info
     if command -v ffprobe &> /dev/null; then
         DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_VIDEO" 2>/dev/null)
         SIZE=$(du -h "$OUTPUT_VIDEO" | cut -f1)
-        echo "  Duration: ${DURATION}s"
-        echo "  Size: $SIZE"
+        echo "Video info: ${DURATION}s, $SIZE"
     fi
 fi
 echo ""

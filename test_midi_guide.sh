@@ -10,8 +10,6 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== MIDI Guide Converter ===${NC}\n"
-
 # Check arguments
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <midi_file.mid> <channel> [options]"
@@ -79,12 +77,6 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Converting MIDI to guide sequence${NC}"
-echo "Input: $MIDI_FILE"
-echo "Channel: $CHANNEL"
-echo "Output: $OUTPUT_JSON"
-echo ""
-
 $PYTHON_CMD src/midi_guide_converter.py \
     --midi "$MIDI_FILE" \
     --channel "$CHANNEL" \
@@ -92,18 +84,12 @@ $PYTHON_CMD src/midi_guide_converter.py \
     --temp-dir "$TEMP_DIR" \
     "${FILTERED_ARGS[@]}"
 
-echo ""
-echo -e "${GREEN}=== Conversion Complete ===${NC}"
-echo ""
-echo "Results saved to:"
-echo "  - Guide sequence: $OUTPUT_JSON"
-
 # Get the basename without extension for audio preview path
 MIDI_BASENAME=$(basename "$MIDI_FILE" | sed 's/\.[^.]*$//')
-echo "  - Audio preview: $TEMP_DIR/${MIDI_BASENAME}_midi_preview.wav"
+
 echo ""
 echo "Next steps:"
-echo "  1. Listen to the audio preview to verify notes are correct"
+echo "  1. Listen to the audio preview: $TEMP_DIR/${MIDI_BASENAME}_midi_preview.wav"
 echo "  2. Run pitch matcher to match against source database:"
 echo "     ./test_pitch_matcher.sh $OUTPUT_JSON data/segments/source_database.json"
 echo ""
