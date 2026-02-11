@@ -1,6 +1,5 @@
 #!/bin/bash
-# Split MIDI file into separate WAV files per channel
-# Useful for identifying which channel contains the vocal/melody track
+# Render MIDI file to WAV (all channels merged)
 #
 # Supports two synthesis modes:
 # - FluidSynth (default): Uses SoundFont for realistic instrument sounds
@@ -14,22 +13,21 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${BLUE}=== MIDI Channel Splitter ===${NC}\n"
+echo -e "${BLUE}=== MIDI to WAV Renderer ===${NC}\n"
 
 # Show help if no arguments or --help/-h flag
 if [ $# -lt 1 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    echo "Usage: $0 <midi_file> [output_dir] [options]"
+    echo "Usage: $0 <midi_file> [output.wav] [options]"
     echo ""
-    echo "Exports each MIDI channel as a separate WAV file with correct instrument sounds."
+    echo "Renders a MIDI file to WAV with all channels merged."
     echo ""
     echo "Arguments:"
     echo "  midi_file    Path to MIDI file"
-    echo "  output_dir   Output directory (default: data/temp/midi_channels)"
+    echo "  output.wav   Output WAV path (default: <midi_name>.wav)"
     echo ""
     echo "Options (pass after arguments):"
     echo "  --soundfont PATH   Path to SoundFont file (.sf2)"
     echo "  --no-fluidsynth    Use simple synthesis instead of FluidSynth"
-    echo "  --list-only        List channels without exporting"
     echo "  --sample-rate N    Audio sample rate for simple synthesis (default: 22050)"
     echo ""
     echo "FluidSynth Mode (default):"
@@ -44,13 +42,10 @@ if [ $# -lt 1 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo ""
     echo "Examples:"
     echo "  $0 song.mid"
+    echo "  $0 song.mid output.wav"
     echo "  $0 song.mid --soundfont data/soundfonts/GeneralUser_GS.sf2"
-    echo "  $0 song.mid data/output/channels"
-    echo "  $0 song.mid --list-only"
+    echo "  $0 song.mid output.wav --soundfont data/soundfonts/GeneralUser_GS.sf2"
     echo "  $0 song.mid --no-fluidsynth"
-    echo ""
-    echo "After running, listen to each WAV file to identify the melody,"
-    echo "then use that channel with: ./test_midi_guide.sh song.mid <channel>"
     exit 1
 fi
 
@@ -63,17 +58,12 @@ if [ ! -f "$MIDI_FILE" ]; then
     exit 1
 fi
 
-# Default output directory
-OUTPUT_DIR="data/temp/midi_channels"
-
-# Check if second argument is a directory path (not an option)
+# Check if second argument is an output path (not an option)
+OUTPUT_ARG=""
 if [ $# -ge 1 ] && [[ ! "$1" == --* ]]; then
-    OUTPUT_DIR="$1"
+    OUTPUT_ARG="--output $1"
     shift
 fi
-
-# Create output directory
-mkdir -p "$OUTPUT_DIR"
 
 # Detect Python command
 if command -v python &> /dev/null; then
@@ -85,12 +75,11 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Splitting MIDI channels${NC}"
+echo -e "${GREEN}Rendering MIDI to WAV${NC}"
 echo "Input: $MIDI_FILE"
-echo "Output: $OUTPUT_DIR"
 echo ""
 
-$PYTHON_CMD src/midi_channel_splitter.py \
+$PYTHON_CMD src/midi_renderer.py \
     --midi "$MIDI_FILE" \
-    --output-dir "$OUTPUT_DIR" \
+    $OUTPUT_ARG \
     "$@"

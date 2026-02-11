@@ -4,6 +4,7 @@ nimbalyst-local/
 
 # Data files (audio, video, separated stems, outputs)
 data/
+!data/soundfonts/README.md
 
 # Model checkpoints (too large for git)
 .checkpoints/

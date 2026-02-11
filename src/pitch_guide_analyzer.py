@@ -36,17 +36,19 @@ except ImportError:
 class PitchGuideAnalyzer:
     """Analyzes guide video to extract target pitch sequence."""
 
-    def __init__(self, video_path: str, pitch_method: str = 'crepe'):
+    def __init__(self, video_path: str, pitch_method: str = 'crepe', device: str = 'auto'):
         """
         Initialize the analyzer.
 
         Args:
             video_path: Path to guide video file
             pitch_method: Pitch detection method ('crepe', 'basic-pitch', or 'pyin')
+            device: Device for neural network models ('auto', 'cuda', 'cpu')
         """
         self.video_path = Path(video_path)
         self.audio_path = None
         self.pitch_method = pitch_method
+        self.device = device
 
         self.audio = None
         self.sr = None
@@ -138,7 +140,7 @@ class PitchGuideAnalyzer:
         print(f"\nDetecting pitch changes (threshold={pitch_change_threshold} cents)...")
 
         # Use pitch change detector
-        detector = PitchChangeDetector(str(self.audio_path), sr=self.sr, pitch_method=self.pitch_method)
+        detector = PitchChangeDetector(str(self.audio_path), sr=self.sr, pitch_method=self.pitch_method, device=self.device)
 
         # Extract continuous pitch with optional smoothing
         detector.extract_continuous_pitch(frame_time=0.01, pitch_smoothing_window=pitch_smoothing)
@@ -688,6 +690,13 @@ def main():
         action='store_true',
         help='Skip RMS verification for rest segments (faster, less accurate)'
     )
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cuda', 'cpu'],
+        help='Device for neural network models (default: auto). Use cuda for GPU acceleration'
+    )
 
     args = parser.parse_args()
 
@@ -701,10 +710,11 @@ def main():
         pitch_method = 'pyin'
         print("Note: --use-pyin is deprecated, use --pitch-method pyin instead")
 
-    print(f"Pitch detection: {pitch_method.upper()}\n")
+    print(f"Pitch detection: {pitch_method.upper()}")
+    print(f"Device: {args.device}\n")
 
     # Initialize analyzer
-    analyzer = PitchGuideAnalyzer(args.video, pitch_method=pitch_method)
+    analyzer = PitchGuideAnalyzer(args.video, pitch_method=pitch_method, device=args.device)
 
     # Step 1: Extract audio
     analyzer.extract_audio(output_dir=args.temp_dir)

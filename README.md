@@ -578,11 +578,22 @@ Assemble the final video from the match plan:
 4. **Concatenates clips** into final seamless video
 5. **Outputs high-quality video** (H.264 CRF 18, AAC 320kbps)
 
+**Rest segment handling:**
+
+Rest segments (silence/gaps in the guide) are handled in three tiers:
+
+1. **Source silence clips (default)**: The pitch matcher finds quiet segments from your source videos and includes them in the match plan. The assembler uses the video but replaces its audio with true silence.
+2. **Black frames (`--true-silence`)**: Forces all rest segments to use black frames with muted audio, ignoring any source silence clips.
+3. **Fallback**: If no source silence clips were found for a rest, black frames are generated automatically.
+
 **Options:**
 
 ```bash
 # Custom output location
 ./test_pitch_video_assembly.sh match_plan.json --output videos/my_video.mp4
+
+# Force black frames for all rest segments
+./test_pitch_video_assembly.sh match_plan.json --true-silence
 
 # Keep temporary files for debugging
 ./test_pitch_video_assembly.sh match_plan.json --no-cleanup
