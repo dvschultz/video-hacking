@@ -50,21 +50,24 @@ if [ ! -f "$MATCH_PLAN" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/output"
+# Parse --output from extra args if provided, and build filtered args
 TEMP_DIR="data/temp"
-OUTPUT_VIDEO="$OUTPUT_DIR/duration_matched_video.mp4"
-
-# Check if user provided custom output path
-for arg in "$@"; do
-    if [[ "$arg" == "--output" ]]; then
-        CUSTOM_OUTPUT=true
-        break
+OUTPUT_VIDEO="data/output/duration_matched_video.mp4"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_VIDEO="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
     fi
 done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_VIDEO")"
 mkdir -p "$TEMP_DIR"
 
 # Detect Python command
@@ -79,34 +82,14 @@ fi
 
 echo -e "${GREEN}Assembling video from duration match plan${NC}"
 echo "Match plan: $MATCH_PLAN"
+echo "Output: $OUTPUT_VIDEO"
+echo ""
 
-# Build command with conditional output flag
-if [ -z "$CUSTOM_OUTPUT" ]; then
-    echo "Output: $OUTPUT_VIDEO"
-    echo ""
-    $PYTHON_CMD src/duration_video_assembler.py \
-        --match-plan "$MATCH_PLAN" \
-        --output "$OUTPUT_VIDEO" \
-        --temp-dir "$TEMP_DIR" \
-        "$@"
-else
-    echo "Output: (custom path specified)"
-    echo ""
-    $PYTHON_CMD src/duration_video_assembler.py \
-        --match-plan "$MATCH_PLAN" \
-        --temp-dir "$TEMP_DIR" \
-        "$@"
-
-    # Try to extract custom output path for final message
-    for i in $(seq 1 $#); do
-        arg="${!i}"
-        if [[ "$arg" == "--output" ]]; then
-            next=$((i+1))
-            OUTPUT_VIDEO="${!next}"
-            break
-        fi
-    done
-fi
+$PYTHON_CMD src/duration_video_assembler.py \
+    --match-plan "$MATCH_PLAN" \
+    --output "$OUTPUT_VIDEO" \
+    --temp-dir "$TEMP_DIR" \
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Video Assembly Complete ===${NC}"

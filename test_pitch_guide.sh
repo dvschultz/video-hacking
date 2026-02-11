@@ -17,6 +17,7 @@ if [ $# -lt 1 ]; then
     echo "Usage: $0 <guide_video.mp4> [options]"
     echo ""
     echo "Options:"
+    echo "  --output PATH        Output JSON path (default: data/segments/guide_sequence.json)"
     echo "  --fps N              Video frame rate (default: 24)"
     echo "  --threshold N        Pitch change threshold in cents (default: 50)"
     echo "                       Splits when pitch changes by N cents OR at silence"
@@ -38,16 +39,20 @@ if [ $# -lt 1 ]; then
     echo "  --min-rest-duration N  Minimum gap to create rest segment (default: 0.1s)"
     echo "  --no-rest-segments   Disable rest detection (pitched segments only)"
     echo "  --no-verify-rest-rms Skip RMS verification for rests (faster)"
+    echo "  --device DEVICE      Device for neural networks: auto, cuda, cpu (default: auto)"
+    echo "                       Use --device cuda to force GPU acceleration"
     echo "  --use-pyin           (Deprecated) Use pYIN - prefer --pitch-method pyin"
     echo ""
     echo "Examples:"
     echo "  $0 data/input/singing_guide.mp4"
+    echo "  $0 data/input/singing_guide.mp4 --output data/segments/my_guide.json"
     echo "  $0 data/input/singing_guide.mp4 --min-duration 0.15  # Filter short notes"
     echo "  $0 data/input/singing_guide.mp4 --pitch-smoothing 5  # Smooth out vibrato"
     echo "  $0 data/input/singing_guide.mp4 --pitch-method hybrid  # Best of both CREPE+SwiftF0"
     echo "  $0 data/input/singing_guide.mp4 --pitch-method swift-f0  # Use fast SwiftF0"
     echo "  $0 data/input/singing_guide.mp4 --pitch-method basic-pitch  # Use Spotify's Basic Pitch"
     echo "  $0 data/input/singing_guide.mp4 --silence-threshold -60  # More permissive silence detection"
+    echo "  $0 data/input/singing_guide.mp4 --pitch-method rmvpe --device cuda  # Use GPU"
     exit 1
 fi
 
@@ -65,8 +70,22 @@ OUTPUT_DIR="data/segments"
 TEMP_DIR="data/temp"
 OUTPUT_JSON="$OUTPUT_DIR/guide_sequence.json"
 
+# Parse --output from extra args if provided, and build filtered args
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
+    fi
+done
+
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_JSON")"
 mkdir -p "$TEMP_DIR"
 
 # Detect Python command
@@ -88,14 +107,18 @@ $PYTHON_CMD src/pitch_guide_analyzer.py \
     --video "$GUIDE_VIDEO" \
     --output "$OUTPUT_JSON" \
     --temp-dir "$TEMP_DIR" \
-    "$@"
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}Step 2: Creating MIDI preview video${NC}"
 echo ""
 
+# Determine preview video path (same directory as output JSON)
+PREVIEW_DIR=$(dirname "$OUTPUT_JSON")
+PREVIEW_VIDEO="$PREVIEW_DIR/guide_midi_preview.mp4"
+mkdir -p "$PREVIEW_DIR"
+
 if [ -f "$OUTPUT_JSON" ]; then
-    PREVIEW_VIDEO="$OUTPUT_DIR/guide_midi_preview.mp4"
     $PYTHON_CMD src/pitch_video_preview.py \
         --video "$GUIDE_VIDEO" \
         --pitch-json "$OUTPUT_JSON" \
@@ -109,10 +132,10 @@ echo -e "${GREEN}=== Analysis Complete ===${NC}"
 echo ""
 echo "Results saved to:"
 echo "  - Pitch sequence: $OUTPUT_JSON"
-echo "  - Preview video: $OUTPUT_DIR/guide_midi_preview.mp4"
+echo "  - Preview video: $PREVIEW_VIDEO"
 echo ""
 echo "Next steps:"
-echo "  1. Watch guide_midi_preview.mp4 to verify pitch detection"
+echo "  1. Watch $PREVIEW_VIDEO to verify pitch detection"
 echo "     (MIDI tones should match the singing!)"
 echo "  2. Adjust --threshold if too many/few notes detected"
 echo "  3. Run source video analysis with same settings"

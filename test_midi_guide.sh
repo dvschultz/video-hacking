@@ -49,13 +49,24 @@ if [ ! -f "$MIDI_FILE" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/segments"
+# Parse --output from extra args if provided, and build filtered args
 TEMP_DIR="data/temp"
-OUTPUT_JSON="$OUTPUT_DIR/guide_sequence.json"
+OUTPUT_JSON="data/segments/guide_sequence.json"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
+    fi
+done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_JSON")"
 mkdir -p "$TEMP_DIR"
 
 # Detect Python command
@@ -79,7 +90,7 @@ $PYTHON_CMD src/midi_guide_converter.py \
     --channel "$CHANNEL" \
     --output "$OUTPUT_JSON" \
     --temp-dir "$TEMP_DIR" \
-    "$@"
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Conversion Complete ===${NC}"

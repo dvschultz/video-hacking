@@ -71,13 +71,24 @@ if [ ! -f "$MATCH_PLAN" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/output"
-OUTPUT_VIDEO="$OUTPUT_DIR/pitch_matched_video.mp4"
+# Parse --output from extra args if provided, and build filtered args
 TEMP_DIR="data/temp"
+OUTPUT_VIDEO="data/output/pitch_matched_video.mp4"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_VIDEO="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
+    fi
+done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_VIDEO")"
 mkdir -p "$TEMP_DIR"
 
 # Detect Python command
@@ -100,7 +111,7 @@ $PYTHON_CMD src/pitch_video_assembler.py \
     --match-plan "$MATCH_PLAN" \
     --output "$OUTPUT_VIDEO" \
     --temp-dir "$TEMP_DIR" \
-    "$@"
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Video Assembly Complete ===${NC}"

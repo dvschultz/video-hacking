@@ -22,7 +22,6 @@ from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
 from pitch_utils import midi_to_note_name
-from edl_generator import EDLGenerator
 
 # Minimum clip duration (1 frame at 24fps = ~0.042s)
 MIN_CLIP_DURATION = 0.04
@@ -44,7 +43,8 @@ class PitchMatcher:
                  allow_transposition: bool = True,
                  max_transposition_semitones: int = 12,
                  prefer_small_transposition: bool = True,
-                 combine_clips_for_duration: bool = True):
+                 combine_clips_for_duration: bool = True,
+                 min_volume_db: float = None):
         """
         Initialize the pitch matcher.
 
@@ -62,6 +62,7 @@ class PitchMatcher:
             max_transposition_semitones: Maximum semitones to transpose
             prefer_small_transposition: Prefer smaller transposition amounts
             combine_clips_for_duration: Combine multiple clips to meet duration (vs just looping one)
+            min_volume_db: Minimum RMS volume in dB (e.g., -40). Segments quieter than this are excluded.
         """
         self.guide_path = Path(guide_path)
         self.source_db_path = Path(source_db_path)
@@ -85,6 +86,9 @@ class PitchMatcher:
         # Duration handling
         self.combine_clips_for_duration = combine_clips_for_duration
 
+        # Volume filtering
+        self.min_volume_db = min_volume_db
+
         # Data
         self.guide_sequence = None
         self.source_database = None
@@ -95,6 +99,7 @@ class PitchMatcher:
         self.segment_usage = defaultdict(int)  # segment_id -> usage count
         self.last_used_position = {}  # segment_id -> last position used
         self.missing_pitches = set()  # MIDI notes not in source database
+        self.volume_filtered_count = 0  # Segments excluded by volume filter
 
     def load_guide_sequence(self):
         """Load guide sequence from JSON."""
@@ -212,6 +217,33 @@ class PitchMatcher:
         else:
             return True
 
+    def _get_available_segments(self, candidate_ids: List[int], position: int) -> List[int]:
+        """
+        Filter segment IDs by volume and reuse policy.
+
+        Args:
+            candidate_ids: List of candidate segment IDs
+            position: Current position in guide sequence
+
+        Returns:
+            List of available segment IDs after filtering
+        """
+        initial_count = len(candidate_ids)
+
+        # Filter by minimum volume if specified
+        if self.min_volume_db is not None:
+            candidate_ids = [
+                seg_id for seg_id in candidate_ids
+                if self.source_database[seg_id].get('rms_db', -float('inf')) >= self.min_volume_db
+            ]
+            self.volume_filtered_count += initial_count - len(candidate_ids)
+
+        # Filter by reuse policy
+        return [
+            seg_id for seg_id in candidate_ids
+            if self.can_use_segment(seg_id, position)
+        ]
+
     def find_exact_match(self, guide_seg: Dict, position: int) -> Optional[Dict]:
         """
         Find exact pitch match from source database.
@@ -229,14 +261,9 @@ class PitchMatcher:
         if target_midi not in self.source_pitch_index:
             return None
 
-        # Get all segments with this pitch
+        # Get all segments with this pitch and filter by volume/reuse policy
         candidate_ids = self.source_pitch_index[target_midi]
-
-        # Filter by reuse policy
-        available_ids = [
-            seg_id for seg_id in candidate_ids
-            if self.can_use_segment(seg_id, position)
-        ]
+        available_ids = self._get_available_segments(candidate_ids, position)
 
         if not available_ids:
             return None
@@ -295,10 +322,7 @@ class PitchMatcher:
                 continue
 
             candidate_ids = self.source_pitch_index[source_midi]
-            available_ids = [
-                seg_id for seg_id in candidate_ids
-                if self.can_use_segment(seg_id, position)
-            ]
+            available_ids = self._get_available_segments(candidate_ids, position)
 
             if not available_ids:
                 continue
@@ -553,6 +577,8 @@ class PitchMatcher:
                 source_segment_id=source_match['segment_id'],
                 source_pitch_note=source_match['pitch_note'],
                 source_pitch_midi=source_match['pitch_midi'],
+                source_rms_db=source_match.get('rms_db'),
+                source_video_path=source_match.get('video_path'),
                 source_clips=clips
             ))
 
@@ -581,6 +607,11 @@ class PitchMatcher:
         print(f"  Unique source segments used: {len(self.segment_usage)}")
         print(f"  Segments reused: {reused_segments}")
         print(f"  Maximum reuse count: {max_reuse}")
+
+        if self.min_volume_db is not None:
+            print(f"\nVolume filtering:")
+            print(f"  Minimum volume threshold: {self.min_volume_db} dB")
+            print(f"  Segments filtered out: {self.volume_filtered_count}")
 
     def save_match_plan(self, output_path: str):
         """
@@ -616,7 +647,8 @@ class PitchMatcher:
                 'consistency_weight': self.consistency_weight,
                 'allow_transposition': self.allow_transposition,
                 'max_transposition_semitones': self.max_transposition_semitones,
-                'combine_clips_for_duration': self.combine_clips_for_duration
+                'combine_clips_for_duration': self.combine_clips_for_duration,
+                'min_volume_db': self.min_volume_db
             },
             'statistics': {
                 'total_guide_segments': len(self.guide_sequence),
@@ -626,7 +658,8 @@ class PitchMatcher:
                 'rest_segments': rest_count,
                 'unique_source_segments_used': len(self.segment_usage),
                 'segments_reused': reused_segments,
-                'max_reuse_count': max(self.segment_usage.values()) if self.segment_usage else 0
+                'max_reuse_count': max(self.segment_usage.values()) if self.segment_usage else 0,
+                'segments_filtered_by_volume': self.volume_filtered_count
             },
             'missing_pitches': missing_pitches_list,
             'matches': self.matches
@@ -649,71 +682,19 @@ class PitchMatcher:
         Returns:
             Path to generated EDL file
         """
+        from edl_generator import generate_edl_from_matches
+
         print(f"\n=== Generating EDL ===")
         print(f"EDL frame rate: {frame_rate} fps")
 
-        title = Path(output_path).stem
-        edl = EDLGenerator(title, frame_rate=frame_rate)
-
-        # Track timeline position using guide durations
-        timeline_position = 0.0
-
-        for match in self.matches:
-            match_type = match.get('match_type', 'unknown')
-            guide_duration = match.get('guide_duration', 0)
-            source_clips = match.get('source_clips', [])
-
-            # Check if this is a rest/missing with no clips assigned
-            if (match_type == 'rest' or match_type == 'missing') and not source_clips:
-                # Black/rest segment
-                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                if match.get('guide_pitch_note'):
-                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                edl.add_black(guide_duration, record_in=timeline_position,
-                              comment=", ".join(comment_parts))
-            elif source_clips:
-                # Video clip (including silence clips for rests)
-                clip = source_clips[0]
-                video_path = clip.get('video_path', '')
-
-                # Get source video fps (from database or fallback to EDL frame rate)
-                source_fps = self.video_fps_map.get(video_path, frame_rate)
-
-                # Calculate source timecode from frames using source video's fps
-                start_frame = clip.get('video_start_frame', 0)
-                end_frame = clip.get('video_end_frame', start_frame)
-                source_in = start_frame / source_fps
-                source_out = end_frame / source_fps
-
-                # Build comment
-                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-                if match.get('guide_pitch_note'):
-                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-                if match_type == 'rest':
-                    comment_parts.append("(silence clip)")
-                transpose = match.get('transpose_semitones', 0)
-                if transpose != 0:
-                    comment_parts.append(f"Transpose: {transpose:+d} semitones")
-
-                # Use guide_duration for timeline positioning (record IN/OUT)
-                edl.add_event(
-                    source_path=video_path,
-                    source_in=source_in,
-                    source_out=source_out,
-                    record_in=timeline_position,
-                    record_out=timeline_position + guide_duration,
-                    comment=", ".join(comment_parts)
-                )
-
-            # Advance timeline by guide duration
-            timeline_position += guide_duration
-
-        edl_path = edl.write(output_path)
-        print(f"EDL saved to: {edl_path}")
-        print(f"  Events: {edl.event_count}")
-        print(f"  Total duration: {edl.total_duration:.2f}s")
-
-        return edl_path
+        return generate_edl_from_matches(
+            matches=self.matches,
+            output_path=output_path,
+            title=Path(output_path).stem,
+            frame_rate=frame_rate,
+            video_fps_map=self.video_fps_map,
+            verbose=True
+        )
 
 
 def main():
@@ -782,6 +763,12 @@ def main():
         help='Weight for loopability/consistency matching (default: 0.3)'
     )
     parser.add_argument(
+        '--min-volume-db',
+        type=float,
+        default=None,
+        help='Minimum RMS volume in dB (e.g., -40). Segments quieter than this are excluded.'
+    )
+    parser.add_argument(
         '--no-transposition',
         action='store_true',
         help='Disable pitch transposition (only exact matches)'
@@ -822,6 +809,8 @@ def main():
     print(f"Source database: {args.source}")
     print(f"Output: {args.output}")
     print(f"Reuse policy: {args.reuse_policy}")
+    if args.min_volume_db is not None:
+        print(f"Minimum volume: {args.min_volume_db} dB")
 
     # Initialize matcher
     matcher = PitchMatcher(
@@ -837,7 +826,8 @@ def main():
         allow_transposition=not args.no_transposition,
         max_transposition_semitones=args.max_transpose,
         prefer_small_transposition=True,
-        combine_clips_for_duration=not args.no_combine_clips
+        combine_clips_for_duration=not args.no_combine_clips,
+        min_volume_db=args.min_volume_db
     )
 
     # Load data

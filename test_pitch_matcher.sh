@@ -26,6 +26,8 @@ if [ $# -lt 2 ]; then
     echo "  --duration-weight N     Weight for duration matching (default: 0.3)"
     echo "  --confidence-weight N   Weight for pitch confidence matching (default: 0.4)"
     echo "  --consistency-weight N  Weight for loopability/consistency matching (default: 0.3)"
+    echo "  --min-volume-db N       Minimum volume in dB to use segments (e.g., -40)"
+    echo "                          Segments quieter than this threshold are excluded"
     echo "  --no-transposition      Disable pitch transposition"
     echo "  --max-transpose N       Maximum semitones to transpose (default: 12)"
     echo "  --no-combine-clips      Disable combining clips for duration"
@@ -76,12 +78,23 @@ if [ ! -f "$SOURCE_JSON" ]; then
     exit 1
 fi
 
-# Setup paths
-OUTPUT_DIR="data/segments"
-OUTPUT_JSON="$OUTPUT_DIR/match_plan.json"
+# Parse --output from extra args if provided, and build filtered args
+OUTPUT_JSON="data/segments/match_plan.json"
+ARGS=("$@")
+FILTERED_ARGS=()
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [[ "${ARGS[$i]}" == "--output" ]] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+        OUTPUT_JSON="${ARGS[$((i + 1))]}"
+        i=$((i + 2))  # Skip --output and its value
+    else
+        FILTERED_ARGS+=("${ARGS[$i]}")
+        i=$((i + 1))
+    fi
+done
 
 # Create directories
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$(dirname "$OUTPUT_JSON")"
 
 # Detect Python command
 if command -v python &> /dev/null; then
@@ -103,7 +116,7 @@ $PYTHON_CMD src/pitch_matcher.py \
     --guide "$GUIDE_JSON" \
     --source "$SOURCE_JSON" \
     --output "$OUTPUT_JSON" \
-    "$@"
+    "${FILTERED_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}=== Matching Complete ===${NC}"
