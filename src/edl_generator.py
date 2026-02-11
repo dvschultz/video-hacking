@@ -261,7 +261,8 @@ def generate_edl_from_matches(
     frame_rate: float = 24.0,
     video_fps_map: dict = None,
     verbose: bool = False,
-    force_black_rests: bool = False
+    force_black_rests: bool = False,
+    pitch_shifted_paths: dict = None
 ) -> str:
     """
     Generate EDL from a list of match dictionaries.
@@ -277,6 +278,9 @@ def generate_edl_from_matches(
         video_fps_map: Optional dict mapping video_path -> fps for accurate source timecodes
         verbose: If True, print progress messages
         force_black_rests: If True, treat all rest segments as black regardless of source clips
+        pitch_shifted_paths: Optional dict mapping (original_path, semitones) -> shifted_path.
+                             When provided, transposed events use the pre-shifted file and
+                             pitch_shift_semitones is set to 0 in the EDL.
 
     Returns:
         Path to written EDL file
@@ -312,47 +316,115 @@ def generate_edl_from_matches(
             edl.add_black(guide_duration, record_in=timeline_position,
                           comment=", ".join(comment_parts))
         elif source_clips:
-            # Video clip (including matched rests or silence clips)
-            clip = source_clips[0]
-            video_path = clip.get('video_path', '')
-
-            # Get source video fps from mapping or fall back to EDL frame rate
-            source_fps = video_fps_map.get(video_path, frame_rate)
-
-            # Calculate source timecode from frames
-            start_frame = clip.get('video_start_frame', 0)
-            end_frame = clip.get('video_end_frame', start_frame)
-            clip_duration = clip.get('duration', guide_duration)
-
-            # Use frames if available, otherwise calculate from duration
-            if end_frame > start_frame:
-                source_in = start_frame / source_fps
-                source_out = end_frame / source_fps
-            else:
-                source_in = start_frame / source_fps
-                source_out = source_in + clip_duration
-
-            # Build comment
-            comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
-            if match.get('guide_pitch_note'):
-                comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
-            if match_type == 'rest':
-                comment_parts.append("(matched rest)" if match.get('is_rest') else "(silence clip)")
-            crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
-            if crop_mode:
-                comment_parts.append(f"Crop: {crop_mode}")
-
+            # Video clip(s) — iterate all clips (handles looped/combined segments)
             transpose = match.get('transpose_semitones', 0)
+            clip_timeline_pos = timeline_position
 
-            edl.add_event(
-                source_path=video_path,
-                source_in=source_in,
-                source_out=source_out,
-                record_in=timeline_position,
-                record_out=timeline_position + guide_duration,
-                comment=", ".join(comment_parts),
-                pitch_shift_semitones=transpose
-            )
+            for clip_idx, clip in enumerate(source_clips):
+                video_path = clip.get('video_path', '')
+
+                # Get source video fps from mapping or fall back to EDL frame rate
+                source_fps = video_fps_map.get(video_path, frame_rate)
+
+                # Calculate source timecode from frames
+                start_frame = clip.get('video_start_frame', 0)
+                end_frame = clip.get('video_end_frame', start_frame)
+                clip_duration = clip.get('duration', 0)
+
+                # Use frames if available, otherwise calculate from duration
+                if end_frame > start_frame:
+                    source_in = start_frame / source_fps
+                    source_out = end_frame / source_fps
+                    if clip_duration <= 0:
+                        clip_duration = source_out - source_in
+                else:
+                    source_in = start_frame / source_fps
+                    source_out = source_in + clip_duration
+
+                if clip_duration <= 0:
+                    continue
+
+                # Build comment
+                comment_parts = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                if match.get('guide_pitch_note'):
+                    comment_parts.append(f"Note: {match.get('guide_pitch_note')}")
+                if match_type == 'rest':
+                    comment_parts.append("(matched rest)" if match.get('is_rest') else "(silence clip)")
+                crop_mode = clip.get('crop_mode', match.get('crop_mode', ''))
+                if crop_mode:
+                    comment_parts.append(f"Crop: {crop_mode}")
+                # Use pre-shifted video if available
+                event_source_path = video_path
+                event_transpose = transpose
+                if pitch_shifted_paths and transpose != 0:
+                    shifted = pitch_shifted_paths.get((video_path, transpose))
+                    if shifted:
+                        event_source_path = shifted
+                        event_transpose = 0
+                        comment_parts.append(f"PRE-SHIFTED: {transpose:+d} semitones applied to source file")
+
+                edl.add_event(
+                    source_path=event_source_path,
+                    source_in=source_in,
+                    source_out=source_out,
+                    record_in=clip_timeline_pos,
+                    record_out=clip_timeline_pos + clip_duration,
+                    comment=", ".join(comment_parts),
+                    pitch_shift_semitones=event_transpose
+                )
+
+                clip_timeline_pos += clip_duration
+
+            # Looping fallback: if source_clips didn't fill the guide duration,
+            # loop the last clip to cover the remaining time
+            min_fragment = 0.04  # ~1 frame at 24fps
+            remaining = (timeline_position + guide_duration) - clip_timeline_pos
+            if remaining > min_fragment and source_clips:
+                last_clip = source_clips[-1]
+                last_video_path = last_clip.get('video_path', '')
+                last_source_fps = video_fps_map.get(last_video_path, frame_rate)
+                last_start_frame = last_clip.get('video_start_frame', 0)
+                last_end_frame = last_clip.get('video_end_frame', last_start_frame)
+                last_clip_dur = last_clip.get('duration', 0)
+                if last_end_frame > last_start_frame:
+                    last_src_in = last_start_frame / last_source_fps
+                    last_src_out = last_end_frame / last_source_fps
+                    if last_clip_dur <= 0:
+                        last_clip_dur = last_src_out - last_src_in
+                else:
+                    last_src_in = last_start_frame / last_source_fps
+                    last_src_out = last_src_in + last_clip_dur
+
+                if last_clip_dur > 0:
+                    # Reuse the same pre-shifted path logic
+                    loop_source_path = last_video_path
+                    loop_transpose = transpose
+                    if pitch_shifted_paths and transpose != 0:
+                        shifted = pitch_shifted_paths.get((last_video_path, transpose))
+                        if shifted:
+                            loop_source_path = shifted
+                            loop_transpose = 0
+
+                    while remaining > min_fragment:
+                        seg_dur = min(last_clip_dur, remaining)
+                        seg_src_out = last_src_in + seg_dur
+
+                        loop_comment = [f"Guide segment {match.get('guide_segment_id', '?')}"]
+                        if match.get('guide_pitch_note'):
+                            loop_comment.append(f"Note: {match.get('guide_pitch_note')}")
+
+                        edl.add_event(
+                            source_path=loop_source_path,
+                            source_in=last_src_in,
+                            source_out=seg_src_out,
+                            record_in=clip_timeline_pos,
+                            record_out=clip_timeline_pos + seg_dur,
+                            comment=", ".join(loop_comment),
+                            pitch_shift_semitones=loop_transpose
+                        )
+
+                        clip_timeline_pos += seg_dur
+                        remaining -= seg_dur
 
         # Advance timeline by guide duration
         timeline_position += guide_duration
