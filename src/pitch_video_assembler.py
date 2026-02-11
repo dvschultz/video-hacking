@@ -828,7 +828,8 @@ class PitchVideoAssembler:
             title=Path(output_path).stem,
             frame_rate=frame_rate,
             video_fps_map=video_fps_map,
-            verbose=True
+            verbose=True,
+            force_black_rests=self.use_true_silence
         )
 
     def cleanup(self):

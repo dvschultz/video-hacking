@@ -254,7 +254,8 @@ def generate_edl_from_matches(
     title: str = None,
     frame_rate: float = 24.0,
     video_fps_map: dict = None,
-    verbose: bool = False
+    verbose: bool = False,
+    force_black_rests: bool = False
 ) -> str:
     """
     Generate EDL from a list of match dictionaries.
@@ -269,6 +270,7 @@ def generate_edl_from_matches(
         frame_rate: Frame rate for EDL timecode display (default: 24.0)
         video_fps_map: Optional dict mapping video_path -> fps for accurate source timecodes
         verbose: If True, print progress messages
+        force_black_rests: If True, treat all rest segments as black regardless of source clips
 
     Returns:
         Path to written EDL file
@@ -287,9 +289,11 @@ def generate_edl_from_matches(
         guide_duration = match.get('guide_duration', 0)
         source_clips = match.get('source_clips', [])
 
-        # Check if this is a rest/unmatched/missing with no clips assigned
+        # Check if this is a black segment
         is_black_segment = (
             match_type in ('rest', 'unmatched', 'missing') and not source_clips
+        ) or (
+            force_black_rests and match_type == 'rest'
         )
 
         if is_black_segment:
