@@ -225,6 +225,75 @@ def sample_source_database_data():
 
 
 @pytest.fixture
+def sample_multi_video_source_database_data():
+    """Sample source database with segments spread across 4 video files.
+
+    Each video has overlapping but distinct pitch coverage:
+    - video_a.mp4: MIDI 60-65 (C4-F4)
+    - video_b.mp4: MIDI 63-68 (D#4-G#4)
+    - video_c.mp4: MIDI 66-71 (F#4-B4)
+    - video_d.mp4: MIDI 60-62, 69-71 (C4-D4, A4-B4)
+    """
+    videos = {
+        'video_a.mp4': list(range(60, 66)),
+        'video_b.mp4': list(range(63, 69)),
+        'video_c.mp4': list(range(66, 72)),
+        'video_d.mp4': [60, 61, 62, 69, 70, 71],
+    }
+
+    pitch_database = []
+    pitch_index = {}
+    seg_id = 0
+
+    for vpath, midis in videos.items():
+        for midi in midis:
+            # 2 segments per pitch per video for variety
+            for rep in range(2):
+                seg = {
+                    'segment_id': seg_id,
+                    'start_time': seg_id * 0.3,
+                    'end_time': (seg_id + 1) * 0.3,
+                    'duration': 0.3,
+                    'pitch_hz': 261.63 * (2 ** ((midi - 60) / 12)),
+                    'pitch_midi': midi,
+                    'pitch_note': f'MIDI{midi}',
+                    'pitch_confidence': 0.85 + rep * 0.05,
+                    'rms_db': -25.0,
+                    'video_path': vpath,
+                    'video_start_frame': seg_id * 7,
+                    'video_end_frame': (seg_id + 1) * 7,
+                    'loopability': 0.8
+                }
+                pitch_database.append(seg)
+
+                midi_str = str(midi)
+                if midi_str not in pitch_index:
+                    pitch_index[midi_str] = []
+                pitch_index[midi_str].append(seg_id)
+                seg_id += 1
+
+    return {
+        'source_videos': [
+            {'video_path': vpath, 'fps': 24} for vpath in videos
+        ],
+        'num_videos': len(videos),
+        'num_segments': len(pitch_database),
+        'num_unique_pitches': len(pitch_index),
+        'pitch_database': pitch_database,
+        'pitch_index': pitch_index,
+        'silence_segments': []
+    }
+
+
+@pytest.fixture
+def multi_video_source_database_file(temp_dir, sample_multi_video_source_database_data):
+    """Create a temporary multi-video source database JSON file."""
+    path = temp_dir / "multi_video_source_database.json"
+    path.write_text(json.dumps(sample_multi_video_source_database_data))
+    return path
+
+
+@pytest.fixture
 def sample_match_plan_data():
     """Sample match plan JSON structure."""
     return {

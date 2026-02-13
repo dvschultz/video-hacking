@@ -44,7 +44,8 @@ class PitchMatcher:
                  max_transposition_semitones: int = 12,
                  prefer_small_transposition: bool = True,
                  combine_clips_for_duration: bool = True,
-                 min_volume_db: float = None):
+                 min_volume_db: float = None,
+                 one_video_per_note: bool = False):
         """
         Initialize the pitch matcher.
 
@@ -63,6 +64,7 @@ class PitchMatcher:
             prefer_small_transposition: Prefer smaller transposition amounts
             combine_clips_for_duration: Combine multiple clips to meet duration (vs just looping one)
             min_volume_db: Minimum RMS volume in dB (e.g., -40). Segments quieter than this are excluded.
+            one_video_per_note: Lock each unique guide note to one source video file for visual variety.
         """
         self.guide_path = Path(guide_path)
         self.source_db_path = Path(source_db_path)
@@ -88,6 +90,12 @@ class PitchMatcher:
 
         # Volume filtering
         self.min_volume_db = min_volume_db
+
+        # One-video-per-note
+        self.one_video_per_note = one_video_per_note
+        self.note_video_assignments = {}    # midi -> video_path
+        self.video_note_assignments = {}    # video_path -> midi
+        self.unassigned_notes = set()       # notes that couldn't get a unique video
 
         # Data
         self.guide_sequence = None
@@ -144,6 +152,13 @@ class PitchMatcher:
             fps = video_info.get('fps', 24.0)
             if video_path:
                 self.video_fps_map[video_path] = fps
+
+        # Build video-level pitch index: video_path -> {midi -> [segment_ids]}
+        self.video_pitch_index = defaultdict(lambda: defaultdict(list))
+        for seg in self.source_database:
+            vpath = seg.get('video_path', '')
+            midi = seg['pitch_midi']
+            self.video_pitch_index[vpath][midi].append(seg['segment_id'])
 
         print(f"  Loaded {len(self.source_database)} source segments")
         print(f"  Loaded {len(self.silence_segments)} silence segments")
@@ -217,17 +232,29 @@ class PitchMatcher:
         else:
             return True
 
-    def _get_available_segments(self, candidate_ids: List[int], position: int) -> List[int]:
+    def _get_available_segments(self, candidate_ids: List[int], position: int,
+                               target_midi: int = None) -> List[int]:
         """
-        Filter segment IDs by volume and reuse policy.
+        Filter segment IDs by video assignment, volume, and reuse policy.
 
         Args:
             candidate_ids: List of candidate segment IDs
             position: Current position in guide sequence
+            target_midi: Guide note MIDI number (for one-video-per-note filtering)
 
         Returns:
             List of available segment IDs after filtering
         """
+        # Filter by one-video-per-note assignment
+        if (self.one_video_per_note and target_midi is not None
+                and target_midi in self.note_video_assignments
+                and target_midi not in self.unassigned_notes):
+            assigned_video = self.note_video_assignments[target_midi]
+            candidate_ids = [
+                seg_id for seg_id in candidate_ids
+                if self.source_database[seg_id].get('video_path') == assigned_video
+            ]
+
         initial_count = len(candidate_ids)
 
         # Filter by minimum volume if specified
@@ -243,6 +270,172 @@ class PitchMatcher:
             seg_id for seg_id in candidate_ids
             if self.can_use_segment(seg_id, position)
         ]
+
+    def _score_video_for_note(self, video_path: str, target_midi: int,
+                               total_guide_duration: float) -> float:
+        """
+        Score how well a video can serve a particular guide note.
+
+        Args:
+            video_path: Path to the source video
+            target_midi: MIDI note number from the guide
+            total_guide_duration: Total duration needed for this note across all guide segments
+
+        Returns:
+            Score (0-1, higher is better)
+        """
+        video_pitches = self.video_pitch_index.get(video_path, {})
+
+        # Check exact pitch segments
+        exact_seg_ids = video_pitches.get(target_midi, [])
+
+        # Filter by volume if needed
+        if self.min_volume_db is not None:
+            exact_seg_ids = [
+                sid for sid in exact_seg_ids
+                if self.source_database[sid].get('rms_db', -float('inf')) >= self.min_volume_db
+            ]
+
+        # Check nearby pitches (transposable) within max_transposition_semitones
+        nearby_seg_ids = []
+        if not exact_seg_ids and self.allow_transposition:
+            for offset in range(1, self.max_transposition_semitones + 1):
+                for delta in [offset, -offset]:
+                    nearby_midi = target_midi + delta
+                    candidates = video_pitches.get(nearby_midi, [])
+                    if self.min_volume_db is not None:
+                        candidates = [
+                            sid for sid in candidates
+                            if self.source_database[sid].get('rms_db', -float('inf')) >= self.min_volume_db
+                        ]
+                    nearby_seg_ids.extend(candidates)
+
+        usable_seg_ids = exact_seg_ids or nearby_seg_ids
+        if not usable_seg_ids:
+            return 0.0
+
+        # Coverage score: total usable duration vs guide needs
+        total_usable_duration = sum(
+            self.source_database[sid]['duration'] for sid in usable_seg_ids
+        )
+        coverage = min(1.0, total_usable_duration / total_guide_duration) if total_guide_duration > 0 else 1.0
+
+        # Quality score: average confidence and loopability
+        confidences = [self.source_database[sid]['pitch_confidence'] for sid in usable_seg_ids]
+        loopabilities = [self.source_database[sid].get('loopability', 0.5) for sid in usable_seg_ids]
+        quality = (np.mean(confidences) + np.mean(loopabilities)) / 2.0
+
+        # Quantity score: more segments = more variety
+        quantity = min(1.0, len(usable_seg_ids) / 10.0)
+
+        # Transposition closeness: 1.0 for exact, penalized for nearby
+        if exact_seg_ids:
+            transposition_closeness = 1.0
+        else:
+            # Find minimum transposition distance needed
+            min_distance = float('inf')
+            for sid in nearby_seg_ids:
+                dist = abs(self.source_database[sid]['pitch_midi'] - target_midi)
+                min_distance = min(min_distance, dist)
+            transposition_closeness = max(0.0, 1.0 - min_distance * 0.05)
+
+        score = (0.4 * coverage +
+                 0.3 * quality +
+                 0.2 * quantity +
+                 0.1 * transposition_closeness)
+
+        return score
+
+    def _assign_videos_to_notes(self):
+        """
+        Pre-assign one video per unique guide note for visual variety.
+        Called at the start of match_guide_to_source() when one_video_per_note is enabled.
+        """
+        print("\n=== One-Video-Per-Note Assignment ===\n")
+
+        # Step 1: Collect unique non-REST guide notes with their duration needs and occurrence counts
+        note_info = defaultdict(lambda: {'duration': 0.0, 'count': 0})
+        for seg in self.guide_sequence:
+            if seg.get('is_rest', False) or seg.get('pitch_midi', 0) == -1:
+                continue
+            midi = seg['pitch_midi']
+            note_info[midi]['duration'] += seg['duration']
+            note_info[midi]['count'] += 1
+
+        unique_notes = list(note_info.keys())
+        available_videos = list(self.video_pitch_index.keys())
+
+        print(f"  Unique guide notes: {len(unique_notes)}")
+        print(f"  Available source videos: {len(available_videos)}")
+
+        if not unique_notes or not available_videos:
+            print("  Skipping assignment: no notes or no videos")
+            return
+
+        # Step 2: Score all (note, video) pairs
+        scores = {}  # (midi, video_path) -> score
+        note_candidates = defaultdict(list)  # midi -> [(score, video_path)]
+
+        for midi in unique_notes:
+            total_dur = note_info[midi]['duration']
+            for vpath in available_videos:
+                score = self._score_video_for_note(vpath, midi, total_dur)
+                if score > 0:
+                    scores[(midi, vpath)] = score
+                    note_candidates[midi].append((score, vpath))
+
+        # Step 3: Sort notes by difficulty (fewest candidate videos first)
+        notes_by_difficulty = sorted(unique_notes, key=lambda m: len(note_candidates.get(m, [])))
+
+        # Step 4: Greedy assign - pick highest-scoring unassigned video for each note
+        assigned_videos = set()
+        self.note_video_assignments = {}
+        self.video_note_assignments = {}
+        assignment_scores = {}
+
+        for midi in notes_by_difficulty:
+            candidates = sorted(note_candidates.get(midi, []), key=lambda x: -x[0])
+            assigned = False
+            for score, vpath in candidates:
+                if vpath not in assigned_videos:
+                    self.note_video_assignments[midi] = vpath
+                    self.video_note_assignments[vpath] = midi
+                    assigned_videos.add(vpath)
+                    assignment_scores[midi] = score
+                    assigned = True
+                    break
+            if not assigned:
+                self.unassigned_notes.add(midi)
+
+        # Step 5: Second pass for unassigned notes (more notes than videos)
+        if self.unassigned_notes:
+            unassigned_by_rarity = sorted(
+                self.unassigned_notes,
+                key=lambda m: note_info[m]['count']
+            )
+            for midi in unassigned_by_rarity:
+                candidates = sorted(note_candidates.get(midi, []), key=lambda x: -x[0])
+                if candidates:
+                    best_score, best_vpath = candidates[0]
+                    self.note_video_assignments[midi] = best_vpath
+                    assignment_scores[midi] = best_score
+                    # Don't remove from unassigned_notes - keeps track that this is a shared assignment
+
+        # Print assignment summary
+        print(f"\n  {'Note':<8} {'MIDI':<6} {'Video':<60} {'Score':<8} {'Shared'}")
+        print(f"  {'-'*8} {'-'*6} {'-'*60} {'-'*8} {'-'*6}")
+        for midi in sorted(self.note_video_assignments.keys()):
+            vpath = self.note_video_assignments[midi]
+            score = assignment_scores.get(midi, 0.0)
+            shared = "YES" if midi in self.unassigned_notes else ""
+            note_name = midi_to_note_name(midi)
+            video_name = Path(vpath).name if vpath else 'N/A'
+            print(f"  {note_name:<8} {midi:<6} {video_name:<60} {score:<8.3f} {shared}")
+
+        assigned_unique = len(self.note_video_assignments) - len(self.unassigned_notes)
+        print(f"\n  Unique assignments: {assigned_unique}/{len(unique_notes)} notes")
+        if self.unassigned_notes:
+            print(f"  Shared assignments: {len(self.unassigned_notes)} notes (more notes than videos)")
 
     def find_exact_match(self, guide_seg: Dict, position: int) -> Optional[Dict]:
         """
@@ -261,9 +454,11 @@ class PitchMatcher:
         if target_midi not in self.source_pitch_index:
             return None
 
-        # Get all segments with this pitch and filter by volume/reuse policy
+        # Get all segments with this pitch and filter by video/volume/reuse policy
         candidate_ids = self.source_pitch_index[target_midi]
-        available_ids = self._get_available_segments(candidate_ids, position)
+        available_ids = self._get_available_segments(
+            candidate_ids, position, target_midi=guide_seg['pitch_midi']
+        )
 
         if not available_ids:
             return None
@@ -322,7 +517,10 @@ class PitchMatcher:
                 continue
 
             candidate_ids = self.source_pitch_index[source_midi]
-            available_ids = self._get_available_segments(candidate_ids, position)
+            # Pass guide's target_midi so video filter applies to the guide note's assigned video
+            available_ids = self._get_available_segments(
+                candidate_ids, position, target_midi=target_midi
+            )
 
             if not available_ids:
                 continue
@@ -517,6 +715,10 @@ class PitchMatcher:
 
     def match_guide_to_source(self):
         """Main matching logic - match each guide segment to source."""
+        # Run pre-assignment if one-video-per-note is enabled
+        if self.one_video_per_note:
+            self._assign_videos_to_notes()
+
         print("\n=== Matching Guide to Source ===\n")
 
         total_segments = len(self.guide_sequence)
@@ -648,7 +850,8 @@ class PitchMatcher:
                 'allow_transposition': self.allow_transposition,
                 'max_transposition_semitones': self.max_transposition_semitones,
                 'combine_clips_for_duration': self.combine_clips_for_duration,
-                'min_volume_db': self.min_volume_db
+                'min_volume_db': self.min_volume_db,
+                'one_video_per_note': self.one_video_per_note
             },
             'statistics': {
                 'total_guide_segments': len(self.guide_sequence),
@@ -662,8 +865,21 @@ class PitchMatcher:
                 'segments_filtered_by_volume': self.volume_filtered_count
             },
             'missing_pitches': missing_pitches_list,
-            'matches': self.matches
         }
+
+        # Add video assignments when one-video-per-note is active
+        if self.one_video_per_note and self.note_video_assignments:
+            data['video_assignments'] = [
+                {
+                    'note': midi_to_note_name(midi),
+                    'midi': midi,
+                    'video_path': vpath,
+                    'shared': midi in self.unassigned_notes
+                }
+                for midi, vpath in sorted(self.note_video_assignments.items())
+            ]
+
+        data['matches'] = self.matches
 
         with open(output_path, 'w') as f:
             json.dump(data, f, indent=2)
@@ -785,6 +1001,11 @@ def main():
         help='Disable combining multiple clips for duration (only loop single clips)'
     )
     parser.add_argument(
+        '--one-video-per-note',
+        action='store_true',
+        help='Lock each unique guide note to one source video for visual variety'
+    )
+    parser.add_argument(
         '--edl',
         action='store_true',
         help='Generate EDL file alongside match plan'
@@ -811,6 +1032,8 @@ def main():
     print(f"Reuse policy: {args.reuse_policy}")
     if args.min_volume_db is not None:
         print(f"Minimum volume: {args.min_volume_db} dB")
+    if args.one_video_per_note:
+        print(f"One-video-per-note: enabled")
 
     # Initialize matcher
     matcher = PitchMatcher(
@@ -827,7 +1050,8 @@ def main():
         max_transposition_semitones=args.max_transpose,
         prefer_small_transposition=True,
         combine_clips_for_duration=not args.no_combine_clips,
-        min_volume_db=args.min_volume_db
+        min_volume_db=args.min_volume_db,
+        one_video_per_note=args.one_video_per_note
     )
 
     # Load data

@@ -525,3 +525,262 @@ class TestPitchMatcherRestSegments:
         rest_match = matcher_with_rests.matches[1]
         assert rest_match['match_type'] == 'rest'
         assert rest_match['guide_pitch_note'] == 'REST'
+
+
+class TestOneVideoPerNote:
+    """Test one-video-per-note assignment and matching."""
+
+    @pytest.fixture
+    def guide_3_notes(self, temp_dir):
+        """Guide with 3 distinct notes, each appearing twice."""
+        guide_data = {
+            'pitch_segments': [
+                {
+                    'index': i,
+                    'start_time': i * 0.5,
+                    'end_time': (i + 1) * 0.5,
+                    'duration': 0.5,
+                    'pitch_hz': 261.63 * (2 ** ((midi - 60) / 12)),
+                    'pitch_midi': midi,
+                    'pitch_note': f'MIDI{midi}',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                }
+                for i, midi in enumerate([60, 63, 66, 60, 63, 66])
+            ]
+        }
+        path = temp_dir / "guide_3_notes.json"
+        path.write_text(json.dumps(guide_data))
+        return path
+
+    @pytest.fixture
+    def guide_many_notes(self, temp_dir):
+        """Guide with more unique notes than available videos (6 notes, 4 videos)."""
+        guide_data = {
+            'pitch_segments': [
+                {
+                    'index': i,
+                    'start_time': i * 0.5,
+                    'end_time': (i + 1) * 0.5,
+                    'duration': 0.5,
+                    'pitch_hz': 261.63 * (2 ** ((midi - 60) / 12)),
+                    'pitch_midi': midi,
+                    'pitch_note': f'MIDI{midi}',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                }
+                for i, midi in enumerate([60, 63, 66, 69, 61, 64])
+            ]
+        }
+        path = temp_dir / "guide_many_notes.json"
+        path.write_text(json.dumps(guide_data))
+        return path
+
+    @pytest.fixture
+    def guide_with_rest(self, temp_dir):
+        """Guide with notes and a rest segment."""
+        guide_data = {
+            'pitch_segments': [
+                {
+                    'index': 0,
+                    'start_time': 0.0,
+                    'end_time': 0.5,
+                    'duration': 0.5,
+                    'pitch_midi': 60,
+                    'pitch_note': 'C4',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                },
+                {
+                    'index': 1,
+                    'start_time': 0.5,
+                    'end_time': 1.0,
+                    'duration': 0.5,
+                    'pitch_midi': -1,
+                    'pitch_note': 'REST',
+                    'pitch_confidence': 1.0,
+                    'is_rest': True
+                },
+                {
+                    'index': 2,
+                    'start_time': 1.0,
+                    'end_time': 1.5,
+                    'duration': 0.5,
+                    'pitch_midi': 66,
+                    'pitch_note': 'F#4',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                }
+            ]
+        }
+        path = temp_dir / "guide_with_rest.json"
+        path.write_text(json.dumps(guide_data))
+        return path
+
+    def _make_matcher(self, guide_path, source_path, **kwargs):
+        """Helper to create a matcher with one_video_per_note enabled."""
+        with patch('builtins.print'):
+            matcher = PitchMatcher(
+                str(guide_path),
+                str(source_path),
+                reuse_policy='allow',
+                one_video_per_note=True,
+                **kwargs
+            )
+            matcher.load_guide_sequence()
+            matcher.load_source_database()
+        return matcher
+
+    def test_assignment_creates_unique_mappings(self, guide_3_notes, multi_video_source_database_file):
+        """Each unique note should get a different video."""
+        matcher = self._make_matcher(guide_3_notes, multi_video_source_database_file)
+
+        with patch('builtins.print'):
+            matcher._assign_videos_to_notes()
+
+        # 3 notes, 4 videos available -> each note should get a unique video
+        assert len(matcher.note_video_assignments) == 3
+        assigned_videos = set(matcher.note_video_assignments.values())
+        assert len(assigned_videos) == 3  # All different videos
+        assert len(matcher.unassigned_notes) == 0
+
+    def test_matching_uses_assigned_video(self, guide_3_notes, multi_video_source_database_file):
+        """Matched segments should only come from the assigned video for each note."""
+        matcher = self._make_matcher(guide_3_notes, multi_video_source_database_file)
+
+        with patch('builtins.print'):
+            matcher.match_guide_to_source()
+
+        # For each note, all matches should use the same video
+        note_videos = {}
+        for match in matcher.matches:
+            if match['match_type'] in ('exact', 'transposed'):
+                midi = match['guide_pitch_midi']
+                video = match.get('source_video_path')
+                if midi in note_videos:
+                    assert video == note_videos[midi], \
+                        f"Note MIDI {midi} used different videos: {note_videos[midi]} vs {video}"
+                else:
+                    note_videos[midi] = video
+
+        # Different notes should have different videos
+        unique_videos = set(note_videos.values())
+        assert len(unique_videos) == 3
+
+    def test_transposed_matches_respect_assignment(self, temp_dir, multi_video_source_database_file):
+        """Transposed matches should still only use the assigned video."""
+        # Use a note that requires transposition (MIDI 73 not in any video directly)
+        # But MIDI 60 is, and with max_transpose=13 it can reach 73
+        guide_data = {
+            'pitch_segments': [
+                {
+                    'index': 0,
+                    'start_time': 0.0,
+                    'end_time': 0.5,
+                    'duration': 0.5,
+                    'pitch_midi': 60,
+                    'pitch_note': 'C4',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                },
+                {
+                    'index': 1,
+                    'start_time': 0.5,
+                    'end_time': 1.0,
+                    'duration': 0.5,
+                    'pitch_midi': 73,  # Needs transposition
+                    'pitch_note': 'C#5',
+                    'pitch_confidence': 0.9,
+                    'is_rest': False
+                }
+            ]
+        }
+        guide_path = temp_dir / "guide_transpose.json"
+        guide_path.write_text(json.dumps(guide_data))
+
+        matcher = self._make_matcher(
+            guide_path, multi_video_source_database_file,
+            max_transposition_semitones=13
+        )
+
+        with patch('builtins.print'):
+            matcher.match_guide_to_source()
+
+        # Both notes should have assignments
+        assert 60 in matcher.note_video_assignments
+        assert 73 in matcher.note_video_assignments
+
+        # If both got matched, they should use different videos
+        matched = [m for m in matcher.matches if m['match_type'] != 'missing']
+        if len(matched) == 2:
+            videos = [m.get('source_video_path') for m in matched]
+            assert videos[0] != videos[1]
+
+    def test_rare_notes_share_videos(self, guide_many_notes, multi_video_source_database_file):
+        """When there are more notes than videos, rarest notes should share."""
+        matcher = self._make_matcher(guide_many_notes, multi_video_source_database_file)
+
+        with patch('builtins.print'):
+            matcher._assign_videos_to_notes()
+
+        # 6 unique notes, 4 videos -> at least 2 notes must share
+        assert len(matcher.note_video_assignments) == 6
+        assert len(matcher.unassigned_notes) >= 2
+
+    def test_rest_segments_exempt(self, guide_with_rest, multi_video_source_database_file):
+        """REST segments should not be affected by one-video-per-note."""
+        matcher = self._make_matcher(guide_with_rest, multi_video_source_database_file)
+
+        with patch('builtins.print'):
+            matcher.match_guide_to_source()
+
+        # REST shouldn't appear in assignments
+        assert -1 not in matcher.note_video_assignments
+
+        # REST match should still work normally
+        rest_matches = [m for m in matcher.matches if m['match_type'] == 'rest']
+        assert len(rest_matches) == 1
+
+    def test_feature_disabled_by_default(self, guide_3_notes, multi_video_source_database_file):
+        """When one_video_per_note is False, behavior should be unchanged."""
+        with patch('builtins.print'):
+            matcher = PitchMatcher(
+                str(guide_3_notes),
+                str(multi_video_source_database_file),
+                reuse_policy='allow',
+                one_video_per_note=False
+            )
+            matcher.load_guide_sequence()
+            matcher.load_source_database()
+            matcher.match_guide_to_source()
+
+        # Should have no assignments
+        assert len(matcher.note_video_assignments) == 0
+        assert len(matcher.unassigned_notes) == 0
+
+        # Matching should still produce results
+        assert len(matcher.matches) == 6
+
+    def test_save_match_plan_includes_assignments(self, guide_3_notes,
+                                                   multi_video_source_database_file, temp_dir):
+        """Match plan JSON should include video_assignments when feature is active."""
+        matcher = self._make_matcher(guide_3_notes, multi_video_source_database_file)
+
+        with patch('builtins.print'):
+            matcher.match_guide_to_source()
+            output_path = temp_dir / "match_plan.json"
+            matcher.save_match_plan(str(output_path))
+
+        with open(output_path) as f:
+            data = json.load(f)
+
+        assert data['matching_config']['one_video_per_note'] is True
+        assert 'video_assignments' in data
+        assert len(data['video_assignments']) == 3
+
+        # Verify assignment structure
+        for assignment in data['video_assignments']:
+            assert 'note' in assignment
+            assert 'midi' in assignment
+            assert 'video_path' in assignment
+            assert 'shared' in assignment

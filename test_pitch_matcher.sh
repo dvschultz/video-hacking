@@ -29,6 +29,8 @@ if [ $# -lt 2 ]; then
     echo "  --no-transposition      Disable pitch transposition"
     echo "  --max-transpose N       Maximum semitones to transpose (default: 12)"
     echo "  --no-combine-clips      Disable combining clips for duration"
+    echo "  --one-video-per-note    Lock each unique guide note to one source video"
+    echo "                          for visual variety (different notes = different visuals)"
     echo "  --edl                   Generate EDL file alongside match plan"
     echo "  --edl-output PATH       Custom EDL output path"
     echo "  --fps N                 Frame rate for EDL timecode (default: 24)"
