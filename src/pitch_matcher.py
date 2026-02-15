@@ -344,6 +344,12 @@ class PitchMatcher:
                  0.2 * quantity +
                  0.1 * transposition_closeness)
 
+        # Strong preference for videos with exact pitch segments.
+        # Without this, a video with many nearby-pitch segments can outscore
+        # one with fewer exact-pitch segments, causing unnecessary transposition.
+        if not exact_seg_ids:
+            score *= 0.5
+
         return score
 
     def _assign_videos_to_notes(self):

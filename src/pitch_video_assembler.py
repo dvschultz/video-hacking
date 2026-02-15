@@ -329,9 +329,12 @@ class PitchVideoAssembler:
         audio, sr = librosa.load(str(temp_audio), sr=sample_rate)
 
         # Transpose if needed
+        # transpose_semitones from match plan = source_midi - target_midi
+        # To shift source DOWN to target pitch, negate the value
         if transpose_semitones != 0:
-            print(f"    Transposing by {transpose_semitones:+d} semitones")
-            audio = librosa.effects.pitch_shift(audio, sr=sr, n_steps=transpose_semitones)
+            shift = -transpose_semitones
+            print(f"    Transposing by {shift:+d} semitones (source→target)")
+            audio = librosa.effects.pitch_shift(audio, sr=sr, n_steps=shift)
 
         # Trim or pad audio to exact target duration (to match video frames precisely)
         if len(audio) > target_samples:
@@ -860,7 +863,9 @@ class PitchVideoAssembler:
                 continue
 
             # Calculate pitch ratio: 2^(semitones/12)
-            ratio = 2 ** (semitones / 12.0)
+            # Negate semitones: match plan stores source-target offset,
+            # but we need to shift source DOWN to match target pitch
+            ratio = 2 ** (-semitones / 12.0)
 
             print(f"  Generating: {shifted_name} (ratio={ratio:.4f})")
 
